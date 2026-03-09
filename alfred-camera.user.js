@@ -406,17 +406,56 @@
         controls.forEach(addPlayNowButton);
     }
 
+    function findLiveViewerLayoutCandidates() {
+        const allDivs = Array.from(document.querySelectorAll('div'));
+
+        return allDivs.filter((el) => {
+            const style = window.getComputedStyle(el);
+            if (style.display !== 'grid') return false;
+            if (!style.gridTemplateRows || style.gridTemplateRows === 'none') return false;
+
+            const hasVideoContent = Boolean(
+                el.querySelector('video, .video-js, [data-vjs-player], img[alt="camera snapshot"]')
+            );
+            if (!hasVideoContent) return false;
+
+            const hasTimelineOrEventBook = Boolean(
+                el.querySelector('ul.MuiImageList-root, [name="event-item-back-button"], [class*="eventbook"]')
+            );
+
+            return hasTimelineOrEventBook;
+        });
+    }
+
+    function enforceLargerLiveViewerLayout() {
+        const candidates = findLiveViewerLayoutCandidates();
+        if (!candidates.length) return;
+
+        for (const liveLayout of candidates) {
+            if (liveLayout.dataset.tmLargeViewerApplied === '1') continue;
+
+            // Equivalent to the DevTools tweak: disable restrictive grid sizing.
+            liveLayout.style.display = 'block';
+            liveLayout.style.gridTemplateRows = 'unset';
+            liveLayout.dataset.tmLargeViewerApplied = '1';
+
+            console.log('[TM] Applied larger live-viewer layout override.');
+        }
+    }
+
     // Observe the page for app updates
     const observer = new MutationObserver(() => {
         createHeaderToggle();
         handleSupportModal();
         handleTimeoutRefresh();
         ensurePlayNowButtons();
+        enforceLargerLiveViewerLayout();
     });
 
     // Observe the page for download controls
     const observerVideo = new MutationObserver(() => {
         ensurePlayNowButtons();
+        enforceLargerLiveViewerLayout();
     });
 
     // Initialize once immediately.
@@ -425,9 +464,13 @@
     restoreCameraAfterReload();
     installDownloadPathProbe();
     ensurePlayNowButtons();
+    enforceLargerLiveViewerLayout();
 
     // Fallback poll in case clip row updates without subtree mutations in some virtualized views.
-    setInterval(ensurePlayNowButtons, 2000);
+    setInterval(() => {
+        ensurePlayNowButtons();
+        enforceLargerLiveViewerLayout();
+    }, 2000);
 
     observer.observe(document.body, { childList: true, subtree: true });
     observerVideo.observe(document.body, { childList: true, subtree: true });
