@@ -1,5 +1,5 @@
 // ==UserScript==
-// @name         ITS.NY.GOV Policies - All at Once Viewer (2)
+// @name         ITS.NY.GOV Policies - All at Once Viewer
 // @namespace    http://tampermonkey.net/
 // @version      11.0
 // @description  View all NY State IT policies at once with simplified UI and no pagination
