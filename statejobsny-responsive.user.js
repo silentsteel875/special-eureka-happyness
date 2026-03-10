@@ -801,7 +801,7 @@
               positionPreviewBox(event);
             }
           }
-        }, 220);
+        }, 500);
       });
 
       link.addEventListener('mousemove', (event) => {
