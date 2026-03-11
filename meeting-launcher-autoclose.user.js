@@ -7,7 +7,7 @@
 // @match        https://meetny-gov.webex.com/meetny-gov/*
 // @match        https://meetny-gov.webex.com/webappng/sites/meetny-gov/meeting/info/*
 // @match        https://teams.microsoft.com/dl/launcher/launcher.html*
-// @grant        none
+// @grant        window.close
 // @run-at       document-idle
 // ==/UserScript==
 
