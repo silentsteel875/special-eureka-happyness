@@ -7,7 +7,7 @@
 // @match        https://statejobsny.com/public/*
 // @match        https://statejobsny.com/employees/*
 // @run-at       document-idle
-// @grant        none
+// @grant        window.close
 // ==/UserScript==
 
 (function () {
