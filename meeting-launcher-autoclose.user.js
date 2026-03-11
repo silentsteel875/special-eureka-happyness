@@ -14,7 +14,8 @@
 (function () {
     'use strict';
 
-    const COUNTDOWN_SECONDS = 15 * 60;
+    // Set to 15 seconds for testing; change back to 15 * 60 for the real 15 minutes!
+    const COUNTDOWN_SECONDS = 15; 
     const STORAGE_KEY_CANCELLED = 'tm.meetingTabAutoClose.cancelled';
     const STORAGE_KEY_TAB_OPENED_AT = 'tm.meetingTabAutoClose.openedAt';
 
@@ -38,6 +39,9 @@
 
     function attemptCloseTab() {
         try {
+            // Trick the browser into thinking this tab was opened by a script
+            window.open('', '_self', '');
+            // Utilize the Tampermonkey granted close method
             window.close();
         } catch (error) {
             console.warn('[TM] window.close() threw an error:', error);
@@ -166,7 +170,6 @@
         }
 
         intervalId = window.setInterval(() => {
-            // Re-calculate the actual time elapsed based on the system clock
             const currentNow = Date.now();
             remainingSeconds = Math.max(0, COUNTDOWN_SECONDS - Math.floor((currentNow - openedAt) / 1000));
 
