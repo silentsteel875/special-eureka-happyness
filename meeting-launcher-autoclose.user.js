@@ -39,9 +39,8 @@
 
     function attemptCloseTab() {
         try {
-            // Trick the browser into thinking this tab was opened by a script
-            window.open('', '_self', '');
-            // Utilize the Tampermonkey granted close method
+            // Utilize the Tampermonkey granted close method purely by itself.
+            // Do NOT use window.open tricks here, as modern browsers will flag it.
             window.close();
         } catch (error) {
             console.warn('[TM] window.close() threw an error:', error);
