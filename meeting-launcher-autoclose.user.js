@@ -166,7 +166,10 @@
         }
 
         intervalId = window.setInterval(() => {
-            remainingSeconds -= 1;
+            // Re-calculate the actual time elapsed based on the system clock
+            const currentNow = Date.now();
+            remainingSeconds = Math.max(0, COUNTDOWN_SECONDS - Math.floor((currentNow - openedAt) / 1000));
+
             if (remainingSeconds <= 0) {
                 updateCountdown();
                 clearInterval(intervalId);
