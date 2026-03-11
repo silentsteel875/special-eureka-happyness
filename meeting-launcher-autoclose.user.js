@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Meeting Launcher Tab Auto-Close
+// @name         Meeting Launcher Tab Auto-Close / Redirect
 // @namespace    http://tampermonkey.net/
 // @version      2026-03-11
-// @description  Shows a countdown and auto-closes meeting tabs, with a safe-kill fallback.
+// @description  Shows a countdown and auto-closes meeting tabs, or redirects them to DuckDuckGo if blocked.
 // @author       You
 // @match        https://meetny-gov.webex.com/meetny-gov/*
 // @match        https://meetny-gov.webex.com/webappng/sites/meetny-gov/meeting/info/*
@@ -13,9 +13,6 @@
 
 (function () {
     'use strict';
-
-    // Capture the pristine Tampermonkey close function before the page loads
-    const tmClose = window.close;
 
     // Set to 15 seconds for testing; change back to 15 * 60 for the real 15 minutes!
     const COUNTDOWN_SECONDS = 15; 
@@ -41,34 +38,16 @@
     }
 
     function attemptCloseTab() {
-        // Attempt 1: Try the captured Tampermonkey close function
-        try {
-            tmClose();
-        } catch (error) {}
-
-        // Attempt 2: Try the standard close function
+        // Attempt to close it normally first
         try {
             window.close();
         } catch (error) {}
 
-        // The Ultimate Fallback: If the browser refuses to close the tab, 
-        // kill the page content to free up memory and stop background processes.
+        // If the tab is still here after 800ms, the browser blocked the close.
+        // We trigger the redirect to DuckDuckGo instead.
         setTimeout(() => {
-            // Wipe the DOM to stop Webex/Teams scripts
-            document.documentElement.innerHTML = `
-                <head><title>Tab Disabled</title></head>
-                <body style="background: #1a1a1a; color: #888; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; font-family: Arial, sans-serif;">
-                    <div style="text-align: center;">
-                        <h2 style="color: #ccc; margin-bottom: 8px;">Meeting Launched</h2>
-                        <p>This tab has been automatically disabled to save resources.<br>You can safely close it manually.</p>
-                    </div>
-                </body>
-            `;
-            // Redirect to a blank page to fully terminate the session
-            try {
-                window.location.replace('about:blank');
-            } catch (e) {}
-        }, 1000);
+            window.location.replace('https://duckduckgo.com');
+        }, 800);
     }
 
     function cancelAutoClose() {
@@ -105,7 +84,7 @@
         banner.style.boxShadow = '0 10px 30px rgba(0, 0, 0, 0.3)';
 
         const title = document.createElement('div');
-        title.textContent = 'Meeting launch tab will be auto-closed';
+        title.textContent = 'Meeting launch tab will be closed/redirected';
         title.style.fontWeight = '700';
         title.style.marginBottom = '6px';
 
@@ -120,7 +99,7 @@
 
         const closeNowBtn = document.createElement('button');
         closeNowBtn.type = 'button';
-        closeNowBtn.textContent = '✕ Close Now';
+        closeNowBtn.textContent = '✕ Redirect Now';
         closeNowBtn.style.padding = '6px 10px';
         closeNowBtn.style.border = 'none';
         closeNowBtn.style.borderRadius = '8px';
@@ -131,7 +110,7 @@
 
         const cancelBtn = document.createElement('button');
         cancelBtn.type = 'button';
-        cancelBtn.textContent = '⊘ Cancel Auto-Close';
+        cancelBtn.textContent = '⊘ Cancel';
         cancelBtn.style.padding = '6px 10px';
         cancelBtn.style.border = 'none';
         cancelBtn.style.borderRadius = '8px';
@@ -156,7 +135,7 @@
         if (!countdownNode) {
             return;
         }
-        countdownNode.textContent = `This tab will close in ${formatRemaining(remainingSeconds)} unless the user cancels.`;
+        countdownNode.textContent = `This tab will redirect in ${formatRemaining(remainingSeconds)} unless cancelled.`;
     }
 
     function startCountdown() {
