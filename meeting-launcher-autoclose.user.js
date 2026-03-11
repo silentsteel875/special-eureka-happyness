@@ -15,7 +15,7 @@
     'use strict';
 
     // Set to 15 seconds for testing; change back to 15 * 60 for the real 15 minutes!
-    const COUNTDOWN_SECONDS = 15; 
+    const COUNTDOWN_SECONDS = 15 * 60; 
     const STORAGE_KEY_CANCELLED = 'tm.meetingTabAutoClose.cancelled';
     const STORAGE_KEY_TAB_OPENED_AT = 'tm.meetingTabAutoClose.openedAt';
 
