@@ -2,17 +2,20 @@
 // @name         Meeting Launcher Tab Auto-Close
 // @namespace    http://tampermonkey.net/
 // @version      2026-03-11
-// @description  Shows a 15-minute countdown and auto-closes meeting launcher/viewer tabs unless cancelled.
+// @description  Shows a countdown and auto-closes meeting tabs, with a safe-kill fallback.
 // @author       You
 // @match        https://meetny-gov.webex.com/meetny-gov/*
 // @match        https://meetny-gov.webex.com/webappng/sites/meetny-gov/meeting/info/*
 // @match        https://teams.microsoft.com/dl/launcher/launcher.html*
 // @grant        window.close
-// @run-at       document-idle
+// @run-at       document-start
 // ==/UserScript==
 
 (function () {
     'use strict';
+
+    // Capture the pristine Tampermonkey close function before the page loads
+    const tmClose = window.close;
 
     // Set to 15 seconds for testing; change back to 15 * 60 for the real 15 minutes!
     const COUNTDOWN_SECONDS = 15; 
@@ -38,37 +41,34 @@
     }
 
     function attemptCloseTab() {
+        // Attempt 1: Try the captured Tampermonkey close function
         try {
-            // Utilize the Tampermonkey granted close method purely by itself.
-            // Do NOT use window.open tricks here, as modern browsers will flag it.
-            window.close();
-        } catch (error) {
-            console.warn('[TM] window.close() threw an error:', error);
-        }
+            tmClose();
+        } catch (error) {}
 
+        // Attempt 2: Try the standard close function
+        try {
+            window.close();
+        } catch (error) {}
+
+        // The Ultimate Fallback: If the browser refuses to close the tab, 
+        // kill the page content to free up memory and stop background processes.
         setTimeout(() => {
-            if (document.visibilityState !== 'hidden') {
-                const message = document.querySelector('#tm-auto-close-fallback-msg');
-                if (!message) {
-                    const fallback = document.createElement('div');
-                    fallback.id = 'tm-auto-close-fallback-msg';
-                    fallback.textContent = 'This tab could not be closed automatically. You can close it manually.';
-                    fallback.style.position = 'fixed';
-                    fallback.style.top = '80px';
-                    fallback.style.left = '50%';
-                    fallback.style.transform = 'translateX(-50%)';
-                    fallback.style.zIndex = '2147483647';
-                    fallback.style.background = '#7a1f1f';
-                    fallback.style.color = '#fff';
-                    fallback.style.padding = '10px 14px';
-                    fallback.style.borderRadius = '10px';
-                    fallback.style.fontFamily = 'Arial, sans-serif';
-                    fallback.style.fontSize = '13px';
-                    fallback.style.boxShadow = '0 8px 20px rgba(0, 0, 0, 0.3)';
-                    document.body.appendChild(fallback);
-                }
-            }
-        }, 800);
+            // Wipe the DOM to stop Webex/Teams scripts
+            document.documentElement.innerHTML = `
+                <head><title>Tab Disabled</title></head>
+                <body style="background: #1a1a1a; color: #888; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0; font-family: Arial, sans-serif;">
+                    <div style="text-align: center;">
+                        <h2 style="color: #ccc; margin-bottom: 8px;">Meeting Launched</h2>
+                        <p>This tab has been automatically disabled to save resources.<br>You can safely close it manually.</p>
+                    </div>
+                </body>
+            `;
+            // Redirect to a blank page to fully terminate the session
+            try {
+                window.location.replace('about:blank');
+            } catch (e) {}
+        }, 1000);
     }
 
     function cancelAutoClose() {
