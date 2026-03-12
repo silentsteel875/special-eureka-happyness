@@ -6,6 +6,7 @@
 // @author       You
 // @match        https://meetny-gov.webex.com/meetny-gov/*
 // @match        https://meetny-gov.webex.com/webappng/sites/meetny-gov/meeting/info/*
+// @match        https://meetny-gov.webex.com/wbxmjs/joinservice/sites/meetny-gov/meeting/*
 // @match        https://teams.microsoft.com/dl/launcher/launcher.html*
 // @grant        window.close
 // @run-at       document-start
