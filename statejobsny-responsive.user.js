@@ -227,7 +227,6 @@
       if (!enabled) return;
       ensureLengthOptions();
       applyDefaultEntriesPerPage();
-      syncSettingsDefaultLengthSelect();
     });
     lengthObserver.observe(document.body, { childList: true, subtree: true });
   };
@@ -369,7 +368,7 @@
 
   const syncSettingsDefaultLengthSelect = () => {
     const modal = document.getElementById(SETTINGS_MODAL_ID);
-    if (!modal) return;
+    if (!modal || modal.style.display === 'none') return;
     const select = modal.querySelector('#tm-setting-length');
     if (!select) return;
 
@@ -379,8 +378,13 @@
       { value: '250', text: '250' }, { value: '500', text: '500' }, { value: '9999', text: 'All' },
     ];
 
-    select.innerHTML = '';
-    options.forEach((opt) => select.add(new Option(opt.text, opt.value)));
+    const existing = Array.from(select.options).map((o) => `${o.value}:${o.textContent}`).join('|');
+    const incoming = options.map((o) => `${o.value}:${o.text}`).join('|');
+    if (existing !== incoming) {
+      select.innerHTML = '';
+      options.forEach((opt) => select.add(new Option(opt.text, opt.value)));
+    }
+
     if (!options.some((o) => o.value === settings.defaultEntriesPerPage)) {
       settings.defaultEntriesPerPage = options.some((o) => o.value === '100') ? '100' : options[0]?.value || '10';
       saveSettings();
@@ -394,8 +398,8 @@
     modal.querySelector('#tm-setting-agency').checked = settings.widenAgencyColumn;
     modal.querySelector('#tm-setting-deadline').checked = settings.highlightDeadlineApproaching;
     modal.querySelector('#tm-setting-hover-delay').value = String(settings.previewHoverDelayMs);
-    syncSettingsDefaultLengthSelect();
     modal.style.display = 'block';
+    syncSettingsDefaultLengthSelect();
   };
 
   const insertSettingsEntryInNav = () => {
