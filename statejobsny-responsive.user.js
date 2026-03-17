@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         StateJobsNY responsive/full-width layout
 // @namespace    https://statejobsny.com/
-// @version      3.0.1
+// @version      3.0.2
 // @description  Makes StateJobsNY public and employee pages use the full viewport with configurable page settings.
 // @author       You
 // @match        https://statejobsny.com/public/*
@@ -560,25 +560,48 @@
     links.forEach((link) => {
       if (link.dataset.tmPreviewBound === '1') return;
       link.dataset.tmPreviewBound = '1';
-      let hoverTimer = null;
+      let hoverFrame = null;
+      let hoverToken = 0;
+
+      const cancelPendingHover = () => {
+        hoverToken += 1;
+        if (hoverFrame) {
+          window.cancelAnimationFrame(hoverFrame);
+          hoverFrame = null;
+        }
+      };
 
       link.addEventListener('mouseenter', (event) => {
-        hoverTimer = window.setTimeout(async () => {
+        cancelPendingHover();
+        const token = hoverToken;
+        const start = performance.now();
+        const delay = Math.max(0, Number(settings.previewHoverDelayMs) || 0);
+
+        const tick = async (now) => {
+          if (token !== hoverToken) {
+            return;
+          }
+          if (now - start < delay) {
+            hoverFrame = window.requestAnimationFrame(tick);
+            return;
+          }
+
           const body = box.querySelector('.tm-preview-body');
           if (body) body.innerHTML = '<em>Loading preview…</em>';
           box.style.display = 'block';
           if (!previewPinnedPosition) positionPreviewBox(event);
           const content = await loadPreviewContent(link.href);
-          if (box.style.display !== 'none' && body) body.innerHTML = content;
-        }, Number(settings.previewHoverDelayMs) || 0);
+          if (token === hoverToken && box.style.display !== 'none' && body) {
+            body.innerHTML = content;
+          }
+        };
+
+        hoverFrame = window.requestAnimationFrame(tick);
       });
 
       link.addEventListener('mousemove', (event) => positionPreviewBox(event));
       link.addEventListener('mouseleave', () => {
-        if (hoverTimer) {
-          window.clearTimeout(hoverTimer);
-          hoverTimer = null;
-        }
+        cancelPendingHover();
       });
     });
   };
