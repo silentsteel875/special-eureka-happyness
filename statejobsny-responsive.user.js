@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         StateJobsNY responsive/full-width layout
 // @namespace    https://statejobsny.com/
-// @version      3.0.0
+// @version      3.0.1
 // @description  Makes StateJobsNY public and employee pages use the full viewport with configurable page settings.
 // @author       You
 // @match        https://statejobsny.com/public/*
@@ -283,14 +283,11 @@
   };
 
   const ensureGradeAscendingSort = () => {
-    if (!enabled) return;
+    if (!enabled || !isVacancyTablePage()) return;
     const gradeHeader = Array.from(document.querySelectorAll('#vacancyTable thead th')).find((th) => /grade/i.test(th.textContent || ''));
     if (!gradeHeader) return;
     if (gradeHeader.getAttribute('aria-sort') === 'ascending') return;
     gradeHeader.click();
-    window.setTimeout(() => {
-      if (gradeHeader.getAttribute('aria-sort') !== 'ascending') gradeHeader.click();
-    }, 80);
   };
 
   const ensureMobileNavToggle = () => {
@@ -777,9 +774,7 @@
       applyAgencyColumnMode();
       applyDeadlineStyling();
       wireTitleHoverPreview();
-      if (isVacancyTablePage()) {
-        window.setTimeout(ensureGradeAscendingSort, 50);
-      }
+      ensureGradeAscendingSort();
     } else {
       removeStyle();
       stopLengthObserver();
