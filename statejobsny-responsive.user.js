@@ -69,6 +69,7 @@
   const previewCache = new Map();
   const compareCache = new Map();
   const selectedCompareUrls = new Set();
+  let vacancyRefreshScheduled = false;
 
   const isVacancyTablePage = () => Boolean(document.getElementById('vacancyTable'));
 
@@ -215,12 +216,9 @@
     return true;
   };
 
-  const retrySetLength = (remainingAttempts = 30) => {
-    if (!enabled) return;
-    const applied = applyDefaultEntriesPerPage();
-    if (!applied && remainingAttempts > 0) {
-      window.setTimeout(() => retrySetLength(remainingAttempts - 1), 250);
-    }
+  const retrySetLength = () => {
+    if (!enabled || !isVacancyTablePage()) return;
+    applyDefaultEntriesPerPage();
   };
 
   const startLengthObserver = () => {
@@ -684,6 +682,20 @@
     body.appendChild(table);
   };
 
+
+  const scheduleVacancyRefresh = () => {
+    if (vacancyRefreshScheduled) return;
+    vacancyRefreshScheduled = true;
+    window.requestAnimationFrame(() => {
+      vacancyRefreshScheduled = false;
+      normalizeVacancyRowStriping();
+      applyAgencyColumnMode();
+      applyDeadlineStyling();
+      ensureCompareColumn();
+      wireTitleHoverPreview();
+    });
+  };
+
   const ensureCompareColumn = () => {
     if (!isVacancyTablePage()) return;
     const table = document.getElementById('vacancyTable');
@@ -742,11 +754,7 @@
     if (!tbody) return;
 
     stripeObserver = new MutationObserver(() => {
-      normalizeVacancyRowStriping();
-      applyAgencyColumnMode();
-      applyDeadlineStyling();
-      ensureCompareColumn();
-      wireTitleHoverPreview();
+      scheduleVacancyRefresh();
     });
 
     stripeObserver.observe(tbody, { childList: true, subtree: false });
