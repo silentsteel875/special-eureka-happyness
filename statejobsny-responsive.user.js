@@ -70,6 +70,8 @@
   const compareCache = new Map();
   const selectedCompareUrls = new Set();
 
+  const isVacancyTablePage = () => Boolean(document.getElementById('vacancyTable'));
+
   const saveSettings = () => {
     try {
       window.localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
@@ -199,7 +201,7 @@
   };
 
   const applyDefaultEntriesPerPage = () => {
-    if (!enabled || defaultLengthApplied) return true;
+    if (!enabled || defaultLengthApplied || !isVacancyTablePage()) return true;
     const lengthSelect = ensureLengthOptions();
     if (!lengthSelect) return false;
     const desired = settings.defaultEntriesPerPage || '100';
@@ -223,12 +225,18 @@
 
   const startLengthObserver = () => {
     if (lengthObserver) lengthObserver.disconnect();
+    if (!enabled || !isVacancyTablePage()) return;
+
     lengthObserver = new MutationObserver(() => {
-      if (!enabled) return;
+      if (!enabled || !isVacancyTablePage()) return;
       ensureLengthOptions();
-      applyDefaultEntriesPerPage();
+      if (applyDefaultEntriesPerPage()) {
+        stopLengthObserver();
+      }
     });
-    lengthObserver.observe(document.body, { childList: true, subtree: true });
+
+    const wrapper = document.getElementById('vacancyTable_wrapper') || document.body;
+    lengthObserver.observe(wrapper, { childList: true, subtree: true });
   };
 
   const stopLengthObserver = () => {
@@ -544,7 +552,7 @@
   };
 
   const wireTitleHoverPreview = () => {
-    if (!enabled) {
+    if (!enabled || !isVacancyTablePage()) {
       hidePreviewBox();
       return;
     }
@@ -677,6 +685,7 @@
   };
 
   const ensureCompareColumn = () => {
+    if (!isVacancyTablePage()) return;
     const table = document.getElementById('vacancyTable');
     if (!table) return;
 
@@ -723,6 +732,7 @@
 
   const startStripeObserver = () => {
     if (stripeObserver) stripeObserver.disconnect();
+    if (!enabled || !isVacancyTablePage()) return;
     normalizeVacancyRowStriping();
     applyAgencyColumnMode();
     applyDeadlineStyling();
@@ -739,7 +749,7 @@
       wireTitleHoverPreview();
     });
 
-    stripeObserver.observe(tbody, { childList: true, subtree: false, attributes: true, attributeFilter: ['class'] });
+    stripeObserver.observe(tbody, { childList: true, subtree: false });
   };
 
   const stopStripeObserver = () => {
@@ -759,7 +769,9 @@
       applyAgencyColumnMode();
       applyDeadlineStyling();
       wireTitleHoverPreview();
-      window.setTimeout(ensureGradeAscendingSort, 50);
+      if (isVacancyTablePage()) {
+        window.setTimeout(ensureGradeAscendingSort, 50);
+      }
     } else {
       removeStyle();
       stopLengthObserver();
