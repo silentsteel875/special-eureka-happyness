@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         StateJobsNY responsive/full-width layout
 // @namespace    https://statejobsny.com/
-// @version      3.0.2
+// @version      3.0.3
 // @description  Makes StateJobsNY public and employee pages use the full viewport with configurable page settings.
 // @author       You
 // @match        https://statejobsny.com/public/*
@@ -20,6 +20,7 @@
   const MOBILE_NAV_TOGGLE_ID = 'tm-statejobsny-mobile-nav-toggle';
   const PREVIEW_BOX_ID = 'tm-statejobsny-link-preview';
   const COMPARE_OVERLAY_ID = 'tm-statejobsny-compare-overlay';
+  const DEBUG_KEY = 'tm-statejobsny-debug';
 
   const DEFAULT_SETTINGS = {
     responsiveLayout: true,
@@ -72,6 +73,55 @@
   let vacancyRefreshScheduled = false;
 
   const isVacancyTablePage = () => Boolean(document.getElementById('vacancyTable'));
+
+  const isDebugEnabled = () => {
+    try {
+      return window.localStorage.getItem(DEBUG_KEY) === 'on';
+    } catch (_e) {
+      return false;
+    }
+  };
+
+  const debugState = {
+    lengthObserverMutations: 0,
+    stripeObserverMutations: 0,
+    vacancyRefreshRuns: 0,
+    hoverPreviewLoads: 0,
+    lastVacancyRefreshMs: 0,
+  };
+
+  const logDebug = (...args) => {
+    if (!isDebugEnabled()) return;
+    console.debug('[tm-statejobsny]', ...args);
+  };
+
+  const logDebugWarn = (...args) => {
+    if (!isDebugEnabled()) return;
+    console.warn('[tm-statejobsny]', ...args);
+  };
+
+  window.__tmStateJobsDebug = {
+    enable() {
+      try { window.localStorage.setItem(DEBUG_KEY, 'on'); } catch (_e) {}
+      console.info('[tm-statejobsny] debug enabled; reload page to capture startup logs');
+    },
+    disable() {
+      try { window.localStorage.setItem(DEBUG_KEY, 'off'); } catch (_e) {}
+      console.info('[tm-statejobsny] debug disabled');
+    },
+    status() {
+      return {
+        enabled: isDebugEnabled(),
+        settings,
+        debugState: { ...debugState },
+      };
+    },
+    dump() {
+      console.table({ ...debugState });
+      return { ...debugState };
+    },
+  };
+
 
   const saveSettings = () => {
     try {
@@ -203,8 +253,12 @@
 
   const applyDefaultEntriesPerPage = () => {
     if (!enabled || defaultLengthApplied || !isVacancyTablePage()) return true;
+    const t0 = performance.now();
     const lengthSelect = ensureLengthOptions();
-    if (!lengthSelect) return false;
+    if (!lengthSelect) {
+      logDebug('applyDefaultEntriesPerPage: waiting for length select');
+      return false;
+    }
     const desired = settings.defaultEntriesPerPage || '100';
     const has = Array.from(lengthSelect.options).some((o) => o.value === desired);
     const valueToSet = has ? desired : '100';
@@ -213,6 +267,12 @@
       lengthSelect.dispatchEvent(new Event('change', { bubbles: true }));
     }
     defaultLengthApplied = true;
+    const elapsed = performance.now() - t0;
+    if (elapsed > 16) {
+      logDebugWarn('applyDefaultEntriesPerPage slow', Math.round(elapsed), 'ms');
+    } else {
+      logDebug('applyDefaultEntriesPerPage ok', Math.round(elapsed), 'ms', 'value=', lengthSelect.value);
+    }
     return true;
   };
 
@@ -227,6 +287,10 @@
 
     lengthObserver = new MutationObserver(() => {
       if (!enabled || !isVacancyTablePage()) return;
+      debugState.lengthObserverMutations += 1;
+      if (debugState.lengthObserverMutations % 20 === 0) {
+        logDebugWarn('length observer mutations', debugState.lengthObserverMutations);
+      }
       ensureLengthOptions();
       if (applyDefaultEntriesPerPage()) {
         stopLengthObserver();
@@ -590,7 +654,13 @@
           if (body) body.innerHTML = '<em>Loading preview…</em>';
           box.style.display = 'block';
           if (!previewPinnedPosition) positionPreviewBox(event);
+          const t0 = performance.now();
           const content = await loadPreviewContent(link.href);
+          const elapsed = performance.now() - t0;
+          debugState.hoverPreviewLoads += 1;
+          if (elapsed > 100) {
+            logDebugWarn('hover preview fetch/parse slow', Math.round(elapsed), 'ms', link.href);
+          }
           if (token === hoverToken && box.style.display !== 'none' && body) {
             body.innerHTML = content;
           }
@@ -705,14 +775,22 @@
 
   const scheduleVacancyRefresh = () => {
     if (vacancyRefreshScheduled) return;
+    logDebug('scheduleVacancyRefresh queued');
     vacancyRefreshScheduled = true;
     window.requestAnimationFrame(() => {
+      const t0 = performance.now();
       vacancyRefreshScheduled = false;
       normalizeVacancyRowStriping();
       applyAgencyColumnMode();
       applyDeadlineStyling();
       ensureCompareColumn();
       wireTitleHoverPreview();
+      const elapsed = performance.now() - t0;
+      debugState.vacancyRefreshRuns += 1;
+      debugState.lastVacancyRefreshMs = Math.round(elapsed);
+      if (elapsed > 16) {
+        logDebugWarn('vacancy refresh slow', Math.round(elapsed), 'ms', 'run', debugState.vacancyRefreshRuns);
+      }
     });
   };
 
@@ -774,6 +852,10 @@
     if (!tbody) return;
 
     stripeObserver = new MutationObserver(() => {
+      debugState.stripeObserverMutations += 1;
+      if (debugState.stripeObserverMutations % 20 === 0) {
+        logDebugWarn('stripe observer mutations', debugState.stripeObserverMutations);
+      }
       scheduleVacancyRefresh();
     });
 
@@ -811,6 +893,7 @@
 
   insertSettingsEntryInNav();
   ensureSettingsModal();
+  logDebug('bootstrap', { href: location.href, enabled });
   applyState();
   window.addEventListener('resize', applyMobileNavState);
 })();
