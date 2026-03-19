@@ -6,6 +6,8 @@
 // @author       You
 // @match        https://statejobsny.com/public/*
 // @match        https://statejobsny.com/employees/*
+// @match        https://statejobs.ny.gov/public/*
+// @match        https://statejobs.ny.gov/employees/*
 // @run-at       document-idle
 // @grant        none
 // ==/UserScript==
