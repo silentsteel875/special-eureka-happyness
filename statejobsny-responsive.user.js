@@ -24,6 +24,7 @@
   const PREVIEW_BOX_ID = 'tm-statejobsny-link-preview';
   const COMPARE_OVERLAY_ID = 'tm-statejobsny-compare-overlay';
   const COMPARE_BUTTON_ID = 'tm-statejobsny-compare-button';
+  const CLEAR_BUTTON_ID = 'tm-statejobsny-clear-button';
   const COMPARE_ERROR_ID = 'tm-statejobsny-compare-error';
   const DEBUG_KEY = 'tm-statejobsny-debug';
 
@@ -76,6 +77,7 @@
   const compareCache = new Map();
   const selectedCompareUrls = new Set();
   let compareValidationMessage = '';
+  let closeDeadlineFilterActive = false;
   let vacancyRefreshScheduled = false;
 
   const isVacancyTablePage = () => Boolean(document.getElementById('vacancyTable'));
@@ -175,9 +177,32 @@
       #vacancyTable { width:100% !important; max-width:100% !important; margin:0 !important; table-layout:auto !important; }
       #vacancyTable th, #vacancyTable td { white-space:normal !important; overflow-wrap:anywhere !important; vertical-align:middle !important; }
       #vacancyTable tbody td { padding:1px 3px !important; }
+      #vacancyTable .tm-compare-cell, #vacancyTable .tm-compare-header { width:1% !important; text-align:center !important; white-space:nowrap !important; }
+      #vacancyTable th:nth-child(2), #vacancyTable td:nth-child(2),
+      #vacancyTable th:nth-child(4), #vacancyTable td:nth-child(4),
+      #vacancyTable th:nth-child(5), #vacancyTable td:nth-child(5),
+      #vacancyTable th:nth-child(6), #vacancyTable td:nth-child(6),
+      #vacancyTable th:nth-child(8), #vacancyTable td:nth-child(8) {
+        width: 1% !important;
+        white-space: nowrap !important;
+        text-align: center !important;
+      }
+      #vacancyTable th:nth-child(3), #vacancyTable td:nth-child(3) {
+        min-width: clamp(220px, 32vw, 620px) !important;
+      }
       #vacancyTable.tm-agency-wide th:nth-child(7), #vacancyTable.tm-agency-wide td:nth-child(7) { min-width:clamp(110px, 12vw, 170px) !important; }
       #vacancyTable.tm-agency-wide th:nth-child(3), #vacancyTable.tm-agency-wide td:nth-child(3) { min-width:clamp(240px, 30vw, 520px) !important; }
-      #vacancyTable .tm-compare-cell, #vacancyTable .tm-compare-header { width:1% !important; text-align:center !important; white-space:nowrap !important; }
+      #vacancyTable_wrapper .dt-paging.paging_full_numbers {
+        display:flex !important;
+        flex-wrap:wrap !important;
+        align-items:center !important;
+        gap:4px !important;
+      }
+      #vacancyTable_wrapper .dt-paging.paging_full_numbers button,
+      #vacancyTable_wrapper .dt-paging.paging_full_numbers span {
+        display:inline-flex !important;
+        align-items:center !important;
+      }
 
       #tm-statejobsny-mobile-nav-toggle {
         grid-area:nav; display:inline-flex !important; align-items:center !important; justify-content:flex-start !important;
@@ -265,8 +290,9 @@
       #${COMPARE_OVERLAY_ID} th, #${COMPARE_OVERLAY_ID} td { border:1px solid #ddd; padding:6px; vertical-align:top; text-align:left; }
       #${COMPARE_OVERLAY_ID} td.tm-compare-diff { background:#fff7cc; }
 
-      #${COMPARE_BUTTON_ID} { margin-left:10px; }
+      #${COMPARE_BUTTON_ID}, #${CLEAR_BUTTON_ID} { margin-left:10px; }
       #${COMPARE_ERROR_ID} { color:#b00020; font-size:12px; margin-top:6px; }
+      .tm-close-deadline-row-hidden { display:none !important; }
     `;
     document.head.appendChild(style);
     return style;
@@ -370,9 +396,54 @@
     table.classList.toggle('tm-agency-wide', Boolean(settings.widenAgencyColumn));
   };
 
+
+  const getDeadlineColumnIndex = () => getColumnIndexByHeader('Deadline');
+
+  const updateCloseDeadlineLink = () => {
+    const link = document.getElementById('tm-close-deadline-link');
+    if (!link) return;
+    link.textContent = closeDeadlineFilterActive ? 'All Postings' : 'Close to Deadline Postings';
+  };
+
+  const applyCloseDeadlineFilter = () => {
+    if (!isVacancyTablePage()) return;
+    const deadlineIdx = getDeadlineColumnIndex();
+    if (!deadlineIdx) return;
+
+    document.querySelectorAll('#vacancyTable tbody tr').forEach((row) => {
+      const cell = row.children[deadlineIdx - 1];
+      const isClose = cell ? isApproachingDate(cell.textContent) : false;
+      row.classList.toggle('tm-close-deadline-row-hidden', closeDeadlineFilterActive && !isClose);
+    });
+  };
+
+  const ensureCloseDeadlineLink = () => {
+    if (!isVacancyTablePage()) return;
+    if (document.getElementById('tm-close-deadline-link')) return;
+
+    const yesterdayLink = Array.from(document.querySelectorAll('#content a')).find((anchor) => {
+      return /Yesterday's Postings/i.test(anchor.textContent || '');
+    });
+    if (!yesterdayLink || !yesterdayLink.parentElement) return;
+
+    const wrapper = document.createElement('div');
+    const link = document.createElement('a');
+    link.href = '#';
+    link.id = 'tm-close-deadline-link';
+    link.textContent = 'Close to Deadline Postings';
+    link.addEventListener('click', (event) => {
+      event.preventDefault();
+      closeDeadlineFilterActive = !closeDeadlineFilterActive;
+      updateCloseDeadlineLink();
+      applyCloseDeadlineFilter();
+    });
+    wrapper.appendChild(link);
+    yesterdayLink.parentElement.insertAdjacentElement('afterend', wrapper);
+  };
+
   const applyDeadlineStyling = () => {
     if (!enabled) return;
-    const deadlineIdx = getColumnIndexByHeader('Deadline');
+    const deadlineIdx = getDeadlineColumnIndex();
     if (deadlineIdx) {
       document.querySelectorAll(`#vacancyTable tbody tr td:nth-child(${deadlineIdx})`).forEach((cell) => {
         const apply = settings.highlightDeadlineApproaching && isApproachingDate(cell.textContent);
@@ -391,6 +462,9 @@
         right.classList.toggle('tm-urgent-deadline', apply);
       }
     }
+
+    applyCloseDeadlineFilter();
+    updateCloseDeadlineLink();
   };
 
   const ensureGradeAscendingSort = () => {
@@ -903,6 +977,17 @@
     renderComparisonTable(body, valid);
   };
 
+  const clearSelectedComparisons = () => {
+    selectedCompareUrls.clear();
+    document.querySelectorAll('.tm-compare-checkbox').forEach((input) => {
+      input.checked = false;
+      input.setCustomValidity('');
+      input.removeAttribute('aria-invalid');
+    });
+    setCompareValidation('');
+    updateCompareButtonState();
+  };
+
   const ensureCompareButton = () => {
     if (!isVacancyTablePage()) return;
     const lengthWrap = document.querySelector('#vacancyTable_wrapper .dt-length');
@@ -920,6 +1005,18 @@
       lengthWrap.appendChild(button);
     }
 
+    let clearButton = document.getElementById(CLEAR_BUTTON_ID);
+    if (!clearButton) {
+      clearButton = document.createElement('button');
+      clearButton.id = CLEAR_BUTTON_ID;
+      clearButton.type = 'button';
+      clearButton.textContent = 'Clear Selected';
+      clearButton.addEventListener('click', () => {
+        clearSelectedComparisons();
+      });
+      lengthWrap.appendChild(clearButton);
+    }
+
     let error = document.getElementById(COMPARE_ERROR_ID);
     if (!error) {
       error = document.createElement('div');
@@ -933,9 +1030,14 @@
 
   const updateCompareButtonState = () => {
     const button = document.getElementById(COMPARE_BUTTON_ID);
-    if (!button) return;
+    const clearButton = document.getElementById(CLEAR_BUTTON_ID);
     const count = selectedCompareUrls.size;
-    button.disabled = Boolean(compareValidationMessage) || count < 2 || count > 3;
+    if (button) {
+      button.disabled = count < 2 || count > 3;
+    }
+    if (clearButton) {
+      clearButton.disabled = count < 1;
+    }
   };
 
 
@@ -952,6 +1054,7 @@
       applyDeadlineStyling();
       ensureCompareColumn();
       ensureCompareButton();
+      ensureCloseDeadlineLink();
       wireTitleHoverPreview();
       const elapsed = performance.now() - t0;
       debugState.vacancyRefreshRuns += 1;
@@ -1054,6 +1157,7 @@
       applyMobileNavState();
       applyAgencyColumnMode();
       applyDeadlineStyling();
+      ensureCloseDeadlineLink();
       wireTitleHoverPreview();
       ensureGradeAscendingSort();
       updateCompareButtonState();
@@ -1066,6 +1170,8 @@
       if (compare) compare.style.display = 'none';
       const compareBtn = document.getElementById(COMPARE_BUTTON_ID);
       if (compareBtn) compareBtn.disabled = true;
+      const clearBtn = document.getElementById(CLEAR_BUTTON_ID);
+      if (clearBtn) clearBtn.disabled = true;
       applyMobileNavState();
     }
   };
