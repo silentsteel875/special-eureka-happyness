@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         StateJobsNY responsive/full-width layout
 // @namespace    https://statejobsny.com/
-// @version      3.0.3
+// @version      3.1.0
 // @description  Makes StateJobsNY public and employee pages use the full viewport with configurable page settings.
 // @author       You
 // @match        https://statejobsny.com/public/*
@@ -16,12 +16,15 @@
   'use strict';
 
   const STYLE_ID = 'tm-statejobsny-responsive';
+  const BASE_UI_STYLE_ID = 'tm-statejobsny-base-ui';
   const SETTINGS_KEY = 'tm-statejobsny-settings';
   const SETTINGS_ENTRY_ID = 'tm-statejobsny-settings-entry';
   const SETTINGS_MODAL_ID = 'tm-statejobsny-settings-modal';
   const MOBILE_NAV_TOGGLE_ID = 'tm-statejobsny-mobile-nav-toggle';
   const PREVIEW_BOX_ID = 'tm-statejobsny-link-preview';
   const COMPARE_OVERLAY_ID = 'tm-statejobsny-compare-overlay';
+  const COMPARE_BUTTON_ID = 'tm-statejobsny-compare-button';
+  const COMPARE_ERROR_ID = 'tm-statejobsny-compare-error';
   const DEBUG_KEY = 'tm-statejobsny-debug';
 
   const DEFAULT_SETTINGS = {
@@ -72,6 +75,7 @@
   const previewCache = new Map();
   const compareCache = new Map();
   const selectedCompareUrls = new Set();
+  let compareValidationMessage = '';
   let vacancyRefreshScheduled = false;
 
   const isVacancyTablePage = () => Boolean(document.getElementById('vacancyTable'));
@@ -223,6 +227,47 @@
       }
     `;
 
+    document.head.appendChild(style);
+    return style;
+  };
+
+
+  const ensureBaseUiStyle = () => {
+    let style = document.getElementById(BASE_UI_STYLE_ID);
+    if (style) return style;
+
+    style = document.createElement('style');
+    style.id = BASE_UI_STYLE_ID;
+    style.textContent = `
+      #${SETTINGS_MODAL_ID}, #${COMPARE_OVERLAY_ID}, #${PREVIEW_BOX_ID} {
+        position:fixed !important; z-index:10000 !important; background:#fff !important;
+        border:1px solid #7a7a7a !important; box-shadow:0 6px 18px rgba(0,0,0,0.25) !important;
+      }
+      #${SETTINGS_MODAL_ID} {
+        width:min(540px, calc(100vw - 24px)) !important; top:50% !important; left:50% !important;
+        transform:translate(-50%, -50%) !important; display:none;
+      }
+      #${SETTINGS_MODAL_ID} .tm-settings-header,
+      #${COMPARE_OVERLAY_ID} .tm-compare-header,
+      #${PREVIEW_BOX_ID} .tm-preview-header {
+        background:#e9e9e9 !important; border-bottom:1px solid #b8b8b8 !important; padding:8px 10px !important;
+        font-weight:700 !important; display:flex !important; align-items:center !important; justify-content:space-between !important;
+      }
+      #${SETTINGS_MODAL_ID} .tm-settings-body { padding:10px !important; display:grid !important; gap:10px !important; max-height:70vh !important; overflow:auto !important; }
+      #${SETTINGS_MODAL_ID} .tm-settings-row { display:flex !important; flex-wrap:wrap !important; gap:8px !important; align-items:center !important; }
+      #${SETTINGS_MODAL_ID} .tm-settings-note { font-size:12px !important; color:#555 !important; margin-left:24px !important; }
+      .tm-close-btn { border:1px solid #888 !important; background:#fff !important; border-radius:3px !important; padding:1px 8px !important; cursor:pointer !important; font-size:12px !important; }
+
+      #${COMPARE_OVERLAY_ID} { display:none; width:min(980px, calc(100vw - 20px)); max-height:80vh; top:50%; left:50%; transform:translate(-50%, -50%); overflow:hidden; }
+      #${COMPARE_OVERLAY_ID} .tm-compare-body { overflow:auto; max-height:calc(80vh - 48px); padding:8px; }
+      #${COMPARE_OVERLAY_ID} .tm-compare-controls { display:flex; align-items:center; gap:12px; margin-bottom:8px; }
+      #${COMPARE_OVERLAY_ID} table { width:100%; border-collapse:collapse; }
+      #${COMPARE_OVERLAY_ID} th, #${COMPARE_OVERLAY_ID} td { border:1px solid #ddd; padding:6px; vertical-align:top; text-align:left; }
+      #${COMPARE_OVERLAY_ID} td.tm-compare-diff { background:#fff7cc; }
+
+      #${COMPARE_BUTTON_ID} { margin-left:10px; }
+      #${COMPARE_ERROR_ID} { color:#b00020; font-size:12px; margin-top:6px; }
+    `;
     document.head.appendChild(style);
     return style;
   };
@@ -678,6 +723,7 @@
     });
   };
 
+
   const ensureCompareOverlay = () => {
     let overlay = document.getElementById(COMPARE_OVERLAY_ID);
     if (overlay) return overlay;
@@ -697,17 +743,80 @@
     return overlay;
   };
 
+  const setCompareValidation = (message, sourceInput = null) => {
+    compareValidationMessage = message || '';
+    const host = document.getElementById(COMPARE_ERROR_ID);
+    if (host) {
+      host.textContent = compareValidationMessage;
+      host.style.display = compareValidationMessage ? 'block' : 'none';
+    }
+
+    document.querySelectorAll('.tm-compare-checkbox').forEach((input) => {
+      input.setCustomValidity(compareValidationMessage || '');
+      if (!compareValidationMessage) {
+        input.removeAttribute('aria-invalid');
+      }
+    });
+
+    if (compareValidationMessage && sourceInput) {
+      sourceInput.setAttribute('aria-invalid', 'true');
+      sourceInput.reportValidity();
+    }
+
+    updateCompareButtonState();
+  };
+
   const extractComparisonData = (htmlText) => {
     const doc = new DOMParser().parseFromString(htmlText, 'text/html');
     const out = {};
+
+    const addField = (group, label, value) => {
+      const cleanLabel = (label || '').replace(/\s+/g, ' ').trim().replace(/:$/, '');
+      const cleanValue = (value || '').replace(/\s+/g, ' ').trim();
+      if (!cleanLabel) return;
+      out[`${group} > ${cleanLabel}`] = cleanValue;
+    };
+
     doc.querySelectorAll('#content p.row').forEach((row) => {
+      if (row.closest('#vacancyDetails')) {
+        return;
+      }
       const left = row.querySelector('.leftCol');
       const right = row.querySelector('.rightCol');
       if (!left || !right) return;
-      const label = left.textContent.replace(/\s+/g, ' ').trim().replace(/:$/, '');
-      const value = right.textContent.replace(/\s+/g, ' ').trim();
-      if (label && value) out[label] = value;
+      addField('Overview', left.textContent, right.textContent);
     });
+
+    const tabsRoot = doc.querySelector('#vacancyDetails');
+    if (tabsRoot) {
+      const tabNameByPanelId = {};
+      tabsRoot.querySelectorAll('.ui-tabs-nav a[href^="#"]').forEach((a) => {
+        const href = a.getAttribute('href') || '';
+        const id = href.slice(1);
+        if (!id) return;
+        tabNameByPanelId[id] = a.textContent.replace(/\s+/g, ' ').trim() || id;
+      });
+
+      tabsRoot.querySelectorAll(':scope > div[id]').forEach((panel) => {
+        const tabName = tabNameByPanelId[panel.id] || panel.id;
+        let foundRows = 0;
+        panel.querySelectorAll('p.row').forEach((row) => {
+          const left = row.querySelector('.leftCol');
+          const right = row.querySelector('.rightCol');
+          if (!left || !right) return;
+          addField(tabName, left.textContent, right.textContent);
+          foundRows += 1;
+        });
+
+        if (!foundRows) {
+          const text = panel.textContent.replace(/\s+/g, ' ').trim();
+          if (text) {
+            addField(tabName, 'Content', text.slice(0, 1000));
+          }
+        }
+      });
+    }
+
     return out;
   };
 
@@ -724,15 +833,63 @@
     }
   };
 
-  const updateComparisonOverlay = async () => {
-    const overlay = ensureCompareOverlay();
-    const body = overlay.querySelector('.tm-compare-body');
-    const selected = Array.from(selectedCompareUrls);
-    if (selected.length < 2) {
-      overlay.style.display = 'none';
+  const renderComparisonTable = (body, valid) => {
+    const allKeys = new Set();
+    valid.forEach((item) => Object.keys(item.data).forEach((k) => allKeys.add(k)));
+    const keys = Array.from(allKeys);
+    if (!keys.length) {
+      body.innerHTML = '<em>No comparable fields were found.</em>';
       return;
     }
 
+    const controls = document.createElement('div');
+    controls.className = 'tm-compare-controls';
+    controls.innerHTML = '<label><input type="checkbox" id="tm-compare-highlight-diff" checked> Highlight differences</label>';
+
+    const table = document.createElement('table');
+    const head = document.createElement('thead');
+    const trh = document.createElement('tr');
+    trh.innerHTML = '<th>Field</th>' + valid.map((_, i) => `<th>Selection ${i + 1}</th>`).join('');
+    head.appendChild(trh);
+    table.appendChild(head);
+
+    const tbody = document.createElement('tbody');
+    keys.forEach((key) => {
+      const values = valid.map((v) => v.data[key] || '');
+      const differs = new Set(values).size > 1;
+      const tr = document.createElement('tr');
+      tr.innerHTML = `<td><strong>${key}</strong></td>` + values.map((val) => `<td>${val}</td>`).join('');
+      if (differs) {
+        tr.querySelectorAll('td:not(:first-child)').forEach((cell) => {
+          cell.classList.add('tm-compare-diff');
+          cell.dataset.diff = '1';
+        });
+      }
+      tbody.appendChild(tr);
+    });
+    table.appendChild(tbody);
+
+    body.innerHTML = '';
+    body.appendChild(controls);
+    body.appendChild(table);
+
+    const toggle = body.querySelector('#tm-compare-highlight-diff');
+    toggle.addEventListener('change', () => {
+      body.querySelectorAll('td[data-diff="1"]').forEach((cell) => {
+        cell.classList.toggle('tm-compare-diff', toggle.checked);
+      });
+    });
+  };
+
+  const openComparisonOverlay = async () => {
+    const selected = Array.from(selectedCompareUrls);
+    if (selected.length < 2 || selected.length > 3) {
+      updateCompareButtonState();
+      return;
+    }
+
+    const overlay = ensureCompareOverlay();
+    const body = overlay.querySelector('.tm-compare-body');
     body.innerHTML = '<em>Loading comparison…</em>';
     overlay.style.display = 'block';
 
@@ -743,36 +900,44 @@
       return;
     }
 
-    const keys = new Set();
-    valid.forEach((item) => Object.keys(item.data).forEach((k) => keys.add(k)));
-    const differingKeys = Array.from(keys).filter((k) => {
-      const values = valid.map((item) => item.data[k] || '');
-      return new Set(values).size > 1;
-    });
+    renderComparisonTable(body, valid);
+  };
 
-    if (!differingKeys.length) {
-      body.innerHTML = '<em>No differences found across selected rows.</em>';
-      return;
+  const ensureCompareButton = () => {
+    if (!isVacancyTablePage()) return;
+    const lengthWrap = document.querySelector('#vacancyTable_wrapper .dt-length');
+    if (!lengthWrap) return;
+
+    let button = document.getElementById(COMPARE_BUTTON_ID);
+    if (!button) {
+      button = document.createElement('button');
+      button.id = COMPARE_BUTTON_ID;
+      button.type = 'button';
+      button.textContent = 'Compare Selected';
+      button.addEventListener('click', () => {
+        openComparisonOverlay();
+      });
+      lengthWrap.appendChild(button);
     }
 
-    const table = document.createElement('table');
-    const head = document.createElement('thead');
-    const trh = document.createElement('tr');
-    trh.innerHTML = '<th>Field</th>' + valid.map((v, i) => `<th>Selection ${i + 1}</th>`).join('');
-    head.appendChild(trh);
-    table.appendChild(head);
+    let error = document.getElementById(COMPARE_ERROR_ID);
+    if (!error) {
+      error = document.createElement('div');
+      error.id = COMPARE_ERROR_ID;
+      error.style.display = 'none';
+      lengthWrap.insertAdjacentElement('afterend', error);
+    }
 
-    const tbody = document.createElement('tbody');
-    differingKeys.forEach((key) => {
-      const tr = document.createElement('tr');
-      const tds = [`<td><strong>${key}</strong></td>`].concat(valid.map((v) => `<td>${v.data[key] || ''}</td>`));
-      tr.innerHTML = tds.join('');
-      tbody.appendChild(tr);
-    });
-    table.appendChild(tbody);
-    body.innerHTML = '';
-    body.appendChild(table);
+    updateCompareButtonState();
   };
+
+  const updateCompareButtonState = () => {
+    const button = document.getElementById(COMPARE_BUTTON_ID);
+    if (!button) return;
+    const count = selectedCompareUrls.size;
+    button.disabled = Boolean(compareValidationMessage) || count < 2 || count > 3;
+  };
+
 
 
   const scheduleVacancyRefresh = () => {
@@ -786,6 +951,7 @@
       applyAgencyColumnMode();
       applyDeadlineStyling();
       ensureCompareColumn();
+      ensureCompareButton();
       wireTitleHoverPreview();
       const elapsed = performance.now() - t0;
       debugState.vacancyRefreshRuns += 1;
@@ -826,16 +992,22 @@
       input.addEventListener('change', (event) => {
         const url = event.target.dataset.compareUrl;
         if (!url) return;
+
         if (event.target.checked) {
           if (selectedCompareUrls.size >= 3) {
             event.target.checked = false;
+            setCompareValidation('Please select no more than 3 entries to compare.', event.target);
             return;
           }
           selectedCompareUrls.add(url);
         } else {
           selectedCompareUrls.delete(url);
         }
-        updateComparisonOverlay();
+
+        if (selectedCompareUrls.size <= 3) {
+          setCompareValidation('');
+        }
+        updateCompareButtonState();
       });
       td.appendChild(input);
       row.insertBefore(td, row.firstElementChild);
@@ -849,6 +1021,7 @@
     applyAgencyColumnMode();
     applyDeadlineStyling();
     ensureCompareColumn();
+    ensureCompareButton();
 
     const tbody = document.querySelector('#vacancyTable tbody');
     if (!tbody) return;
@@ -872,6 +1045,7 @@
   };
 
   const applyState = () => {
+    ensureBaseUiStyle();
     if (enabled) {
       ensureStyle();
       retrySetLength();
@@ -882,6 +1056,7 @@
       applyDeadlineStyling();
       wireTitleHoverPreview();
       ensureGradeAscendingSort();
+      updateCompareButtonState();
     } else {
       removeStyle();
       stopLengthObserver();
@@ -889,11 +1064,14 @@
       hidePreviewBox();
       const compare = document.getElementById(COMPARE_OVERLAY_ID);
       if (compare) compare.style.display = 'none';
+      const compareBtn = document.getElementById(COMPARE_BUTTON_ID);
+      if (compareBtn) compareBtn.disabled = true;
       applyMobileNavState();
     }
   };
 
   insertSettingsEntryInNav();
+  ensureBaseUiStyle();
   ensureSettingsModal();
   logDebug('bootstrap', { href: location.href, enabled });
   applyState();
