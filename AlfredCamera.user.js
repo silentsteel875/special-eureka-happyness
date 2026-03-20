@@ -139,15 +139,36 @@
     }
 
     function handleSupportModal() {
-        const targetElement = document.querySelector('.MuiDialog-root.MuiModal-root.css-126xj0f');
-        const h2Element = document.querySelector('h2#form-dialog-title');
+        const dialogs = Array.from(document.querySelectorAll('.MuiDialog-root.MuiModal-root, [role="presentation"].MuiDialog-root'));
 
-        if (
-            targetElement &&
-            h2Element &&
-            h2Element.textContent.trim() === 'Alfred Needs Your Support!'
-        ) {
-            targetElement.style.display = 'none';
+        for (const dialog of dialogs) {
+            const titleNode = dialog.querySelector('h2#form-dialog-title, [role="dialog"] h2, h2');
+            const dialogText = `${titleNode?.textContent || ''} ${dialog.textContent || ''}`.trim();
+            if (!/alfred needs your support/i.test(dialogText)) continue;
+
+            const dismissButton = Array.from(dialog.querySelectorAll('button')).find((button) => {
+                const text = (button.textContent || '').trim();
+                return /dismiss/i.test(text);
+            });
+
+            if (dismissButton) {
+                clickElement(dismissButton);
+            }
+
+            dialog.style.display = 'none';
+            dialog.setAttribute('aria-hidden', 'true');
+
+            const backdrop = dialog.querySelector('.MuiBackdrop-root, [class*="Backdrop"]');
+            if (backdrop) {
+                backdrop.style.display = 'none';
+            }
+
+            document.body.style.overflow = '';
+            const rootNode = document.querySelector('#root[aria-hidden="true"]');
+            if (rootNode) {
+                rootNode.removeAttribute('aria-hidden');
+            }
+
             console.log('[TM] Target support dialog hidden');
         }
     }
