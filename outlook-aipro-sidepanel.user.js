@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         Outlook Web + AI Pro sidepanel bridge
 // @namespace    https://pro.ai.ny.gov/
-// @version      0.2.0
+// @version      0.3.0
 // @description  Injects an Outlook Web AI Pro launcher panel that opens AI Pro in a top-level window and sends lightweight context.
 // @author       You
 // @match        https://outlook.office.com/*
@@ -150,20 +150,8 @@
     };
   };
 
-  const postContextToFrame = () => {
-    const context = getContextPayload();
-    const encoded = encodeURIComponent(JSON.stringify(context));
-    const url = `${APP_FALLBACK_URL}#ext_context=${encoded}`;
-
-    if (launchedWindow && !launchedWindow.closed) {
-      launchedWindow.location = url;
-      launchedWindow.focus();
-      return;
-    }
-
-    launchedWindow = window.open(url, 'aipro_window', 'noopener,noreferrer');
-    if (!launchedWindow) {
-      console.warn(`${LOG_PREFIX} popup blocked while launching AI Pro.`);
+  const sendContextToAiProWindow = (context) => {
+    if (!launchedWindow || launchedWindow.closed) {
       return;
     }
 
@@ -197,6 +185,30 @@
         window.clearInterval(intervalId);
       }
     }, 500);
+  };
+
+  const postContextToFrame = () => {
+    const context = getContextPayload();
+
+    const encoded = encodeURIComponent(JSON.stringify(context));
+    const url = `${APP_FALLBACK_URL}#ext_context=${encoded}`;
+
+    if (launchedWindow && !launchedWindow.closed) {
+      launchedWindow.location = url;
+      launchedWindow.focus();
+      sendContextToAiProWindow(context);
+      console.info(`${LOG_PREFIX} refreshed context in existing AI Pro tab/window.`);
+      return;
+    }
+
+    launchedWindow = window.open(url, 'aipro_window', 'noopener,noreferrer');
+    if (!launchedWindow) {
+      console.warn(`${LOG_PREFIX} popup blocked while launching AI Pro.`);
+      return;
+    }
+
+    sendContextToAiProWindow(context);
+    console.info(`${LOG_PREFIX} opened AI Pro and started context transfer.`);
   };
 
   const ensureUi = () => {
@@ -380,6 +392,29 @@
   };
 
   const initAiProReceiver = () => {
+    const observeTextareaForContext = (context) => {
+      let done = false;
+      const tryApply = () => {
+        if (done) {
+          return;
+        }
+
+        if (applyContextToAiProInput(context)) {
+          done = true;
+          console.info(`${LOG_PREFIX} applied Outlook context into AI Pro textarea.`);
+        }
+      };
+
+      tryApply();
+      const observer = new MutationObserver(() => {
+        tryApply();
+      });
+      observer.observe(document.documentElement, { subtree: true, childList: true });
+      window.setTimeout(() => {
+        observer.disconnect();
+      }, 60000);
+    };
+
     window.addEventListener('message', (event) => {
       if (
         event.origin !== 'https://outlook.office.com' &&
@@ -400,22 +435,16 @@
         // Ignore storage errors.
       }
 
-      applyContextToAiProInput(data.payload);
+      observeTextareaForContext(data.payload);
       console.info(`${LOG_PREFIX} received Outlook context via postMessage.`);
     });
 
     const context = getLatestContextFromAnySource();
     if (!context) {
+      console.info(`${LOG_PREFIX} receiver ready; no context found yet.`);
       return;
     }
-
-    let tries = 0;
-    const timer = window.setInterval(() => {
-      tries += 1;
-      if (applyContextToAiProInput(context) || tries >= 20) {
-        window.clearInterval(timer);
-      }
-    }, 500);
+    observeTextareaForContext(context);
   };
 
   if (window.location.hostname === 'pro.ai.ny.gov') {
