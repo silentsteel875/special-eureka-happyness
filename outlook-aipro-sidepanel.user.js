@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Outlook Web + AI Pro sidepanel bridge (Storage Sync)
+// @name         Outlook Web + AI Pro sidepanel bridge (Final Sync)
 // @namespace    https://pro.ai.ny.gov/
-// @version      0.9.0
-// @description  Uses localStorage events to sync authentication between popup and sidepanel.
+// @version      1.0.0
+// @description  Uses aggressive storage heartbeats to ensure the sidepanel reloads and the popup closes.
 // @author       You
 // @match        https://outlook.office.com/*
 // @match        https://outlook.office365.com/*
@@ -19,7 +19,7 @@
   const TOGGLE_ID = 'tm-aipro-toggle';
   const IFRAME_ID = 'tm-aipro-iframe';
   const APP_ORIGIN = 'https://pro.ai.ny.gov';
-  const SYNC_KEY = 'tm_aipro_auth_sync';
+  const SYNC_KEY = 'tm_aipro_auth_heartbeat';
 
   // 1. Inject UI Styles
   GM_addStyle(`
@@ -38,33 +38,50 @@
     
     // --- POPUP LOGIC ---
     if (window.opener) {
-      const notifyAndClose = () => {
-        const isAppLoaded = !!document.querySelector('textarea') || window.location.hash.includes('code=');
-        if (isAppLoaded) {
-          console.log('[AI Pro] Login success. Updating storage sync.');
-          // Update localStorage to trigger the 'storage' event in the iframe
+      const monitorPopup = () => {
+        // Detect if we are likely logged in:
+        // 1. We see a textarea OR 2. The URL no longer contains login/auth keywords
+        const hasInput = !!document.querySelector('textarea, [contenteditable="true"]');
+        const isAuthUrl = window.location.href.includes('code=') || window.location.href.includes('state=') || window.location.href.includes('login');
+        
+        // If we have an input OR we are on the base app URL without auth strings...
+        if (hasInput || (!isAuthUrl && window.location.pathname.length <= 1)) {
+          console.log('[AI Pro Popup] Success detected. Pinging sidepanel.');
           localStorage.setItem(SYNC_KEY, Date.now().toString());
-          setTimeout(() => window.close(), 500);
+          
+          // Give it a moment to ensure the sidepanel sees the storage event before closing
+          setTimeout(() => {
+              window.close();
+          }, 1000);
         }
       };
-      setInterval(notifyAndClose, 1000);
+      
+      setInterval(monitorPopup, 1000);
       return;
     }
 
-    // --- IFRAME LOGIC ---
+    // --- IFRAME LOGIC (Sidepanel) ---
     if (window !== window.top) {
-      // 1. Listen for the 'storage' event (Sync via LocalStorage)
+      // Listen for the heartbeat from the popup
       window.addEventListener('storage', (event) => {
         if (event.key === SYNC_KEY) {
-          console.log('[AI Pro] Auth sync detected. Reloading...');
+          console.log('[AI Pro Iframe] Heartbeat received. Refreshing...');
           window.location.reload();
         }
       });
 
-      // 2. Watch for the app's error screen to show our manual button
+      // Backup: check storage on a timer in case the 'storage' event misses
+      let lastHeartbeat = localStorage.getItem(SYNC_KEY);
+      setInterval(() => {
+          const currentHeartbeat = localStorage.getItem(SYNC_KEY);
+          if (currentHeartbeat && currentHeartbeat !== lastHeartbeat) {
+              window.location.reload();
+          }
+      }, 2000);
+
+      // Error screen override
       const errorObserver = new MutationObserver(() => {
-        const bodyText = document.body.innerText;
-        if (bodyText.includes('Authentication Failed') || bodyText.includes('redirect_in_iframe')) {
+        if (document.body.innerText.includes('Authentication Failed') || document.body.innerText.includes('redirect_in_iframe')) {
           injectLoginButton();
           errorObserver.disconnect();
         }
@@ -75,9 +92,9 @@
         const container = document.createElement('div');
         container.className = 'tm-login-container';
         container.innerHTML = `
-          <h3 style="margin:0">Sign-in Required</h3>
-          <p style="color:#666">Click to authorize AI Pro for Outlook.</p>
-          <button class="tm-login-button">Authorize Now</button>
+          <h3 style="margin:0">Authentication Required</h3>
+          <p style="color:#666">Your session is restricted in the sidepanel.</p>
+          <button class="tm-login-button">Unlock AI Pro</button>
         `;
         container.querySelector('button').onclick = () => {
           window.open(window.location.href, 'aipro_auth_popup', 'width=600,height=750');
@@ -112,20 +129,10 @@
     document.body.appendChild(toggle);
 
     toggle.onclick = () => {
-      const isOpen = panel.classList.toggle('open');
-      if (isOpen && iframe.contentWindow) {
-          // Send context
-          const ctx = {
-            subject: document.querySelector('[role="heading"]')?.textContent || '',
-            selectedText: window.getSelection()?.toString() || ''
-          };
-          iframe.contentWindow.postMessage({ type: 'AI_PRO_CONTEXT_V1', payload: ctx }, APP_ORIGIN);
-      }
+      panel.classList.toggle('open');
     };
   };
 
   document.addEventListener('DOMContentLoaded', ensureUi);
   setInterval(ensureUi, 3000);
-
 })();
-
