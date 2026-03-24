@@ -1,8 +1,8 @@
-// ==UserScript==
-// @name         Outlook Web + AI Pro sidepanel bridge (Final Fix)
+    // ==UserScript==
+// @name         Outlook Web + AI Pro sidepanel bridge (CSP Compliant)
 // @namespace    https://pro.ai.ny.gov/
-// @version      0.6.0
-// @description  Bypasses TrustedHTML and MSAL iframe restrictions via user-gestured popup.
+// @version      0.7.0
+// @description  Bypasses strict CSP and MSAL iframe restrictions using CSS injection and DOM observation.
 // @author       You
 // @match        https://outlook.office.com/*
 // @match        https://outlook.office365.com/*
@@ -21,6 +21,25 @@
   const APP_ORIGIN = 'https://pro.ai.ny.gov';
   const LOG_PREFIX = '[AI Pro sidepanel]';
 
+  // 1. CSS Injection - Using GM_addStyle to bypass page CSP
+  const css = `
+    .tm-login-container {
+        height: 100vh; display: flex; flex-direction: column;
+        align-items: center; justify-content: center; font-family: sans-serif;
+        background: #fff; text-align: center; padding: 20px;
+    }
+    .tm-login-button {
+        padding: 12px 24px; background: #005ea2; color: #fff;
+        border: none; border-radius: 4px; cursor: pointer; font-weight: bold;
+        margin-top: 15px;
+    }
+    #${TOGGLE_ID} { position: fixed; right: 16px; bottom: 16px; z-index: 2147483646; border: 0; border-radius: 999px; background: #005ea2; color: #fff; padding: 10px 14px; cursor: pointer; box-shadow: 0 4px 8px rgba(0,0,0,0.3); }
+    #${PANEL_ID} { position: fixed; top: 12px; right: 12px; width: 520px; height: calc(100vh - 24px); z-index: 2147483646; border: 1px solid #ccc; border-radius: 12px; background: #fff; display: none; flex-direction: column; overflow: hidden; box-shadow: 0 4px 12px rgba(0,0,0,0.2); }
+    #${PANEL_ID}.open { display: flex; }
+    #${IFRAME_ID} { flex-grow: 1; border: none; }
+  `;
+  GM_addStyle(css);
+
   // =========================================================================
   // 1. IFRAME & POPUP LOGIC (Runs on pro.ai.ny.gov)
   // =========================================================================
@@ -35,45 +54,42 @@
       return;
     }
 
-    // --- PART B: Catch MSAL Errors and show a "Real" Login Button ---
-    // We listen for the error MSAL throws when it realizes it's in an iframe
-    window.addEventListener('unhandledrejection', (event) => {
-      const error = event.reason;
-      if (error && (error.errorCode === 'redirect_in_iframe' || String(error).includes('redirect_in_iframe'))) {
-        console.warn(`${LOG_PREFIX} MSAL blocked redirect. Showing manual login button.`);
-        showManualLoginUI();
-        event.preventDefault();
+    // --- PART B: Monitor for the "Authentication Failed" UI ---
+    const observer = new MutationObserver(() => {
+      // Check if the app's error message is visible
+      if (document.body && (document.body.innerText.includes('Authentication Failed') || document.body.innerText.includes('redirect_in_iframe'))) {
+        injectLoginButton();
+        observer.disconnect(); // Stop looking once we've replaced it
       }
     });
+    observer.observe(document.documentElement, { childList: true, subtree: true });
 
-    function showManualLoginUI() {
-      // Avoid innerHTML to bypass "TrustedHTML" policy
-      const container = document.createElement('div');
-      Object.assign(container.style, {
-        height: '100vh', display: 'flex', flexDirection: 'column',
-        alignItems: 'center', justifyContent: 'center', fontFamily: 'sans-serif',
-        background: '#fff', textAlign: 'center', padding: '20px'
-      });
-
-      const msg = document.createElement('p');
-      msg.textContent = "Sign-in required to use AI Pro in Outlook.";
+    function injectLoginButton() {
+      console.info(`${LOG_PREFIX} Overriding app error UI with login button.`);
       
+      const container = document.createElement('div');
+      container.className = 'tm-login-container';
+
+      const msg = document.createElement('h3');
+      msg.textContent = "AI Pro Authentication";
+      
+      const subMsg = document.createElement('p');
+      subMsg.textContent = "Please sign in to use this tool within Outlook.";
+
       const btn = document.createElement('button');
-      btn.textContent = "Sign In";
-      Object.assign(btn.style, {
-        padding: '12px 24px', background: '#005ea2', color: '#fff',
-        border: 'none', borderRadius: '4px', cursor: 'pointer', fontWeight: 'bold'
-      });
+      btn.className = 'tm-login-button';
+      btn.textContent = "Sign In Now";
 
       btn.onclick = () => {
-        // This is a user-triggered gesture, so the popup won't be blocked!
-        // We trigger the login by simply refreshing to the base URL which triggers the app's MSAL
-        // But we intercept the next redirect attempt.
+        // Trigger the popup via user gesture
         window.open(window.location.href, 'aipro_auth_popup', 'width=600,height=700');
       };
 
       container.appendChild(msg);
+      container.appendChild(subMsg);
       container.appendChild(btn);
+      
+      // Clear the body and inject our clean button
       document.body.replaceChildren(container);
     }
 
@@ -94,16 +110,6 @@
     if (document.getElementById(PANEL_ID)) return;
     if (!document.body) return;
 
-    // Inject Styles using DOM to be safe
-    const style = document.createElement('style');
-    style.textContent = `
-      #${TOGGLE_ID} { position: fixed; right: 16px; bottom: 16px; z-index: 2147483646; border: 0; border-radius: 999px; background: #005ea2; color: #fff; padding: 10px 14px; cursor: pointer; }
-      #${PANEL_ID} { position: fixed; top: 12px; right: 12px; width: 520px; height: calc(100vh - 24px); z-index: 2147483646; border: 1px solid #ccc; border-radius: 12px; background: #fff; display: none; flex-direction: column; overflow: hidden; box-shadow: 0 4px 12px rgba(0,0,0,0.2); }
-      #${PANEL_ID}.open { display: flex; }
-      #${IFRAME_ID} { flex-grow: 1; border: none; }
-    `;
-    document.head.appendChild(style);
-
     const toggle = document.createElement('button');
     toggle.id = TOGGLE_ID;
     toggle.textContent = 'AI Pro';
@@ -114,13 +120,15 @@
     const iframe = document.createElement('iframe');
     iframe.id = IFRAME_ID;
     iframe.src = APP_ORIGIN;
-    iframe.allow = "popups; clipboard-write";
+    iframe.allow = "popups; clipboard-write"; // Essential for MSAL
 
     panel.appendChild(iframe);
     document.body.appendChild(panel);
     document.body.appendChild(toggle);
 
-    toggle.onclick = () => panel.classList.toggle('open');
+    toggle.onclick = () => {
+        panel.classList.toggle('open');
+    };
   };
 
   // Run on load
