@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Outlook Web + AI Pro sidepanel bridge (Final Sync)
+// @name         Outlook Web + AI Pro sidepanel bridge (Token Injection)
 // @namespace    https://pro.ai.ny.gov/
-// @version      1.0.0
-// @description  Uses aggressive storage heartbeats to ensure the sidepanel reloads and the popup closes.
+// @version      1.1.0
+// @description  Bypasses MSAL session limits by mirroring tokens from popup to iframe.
 // @author       You
 // @match        https://outlook.office.com/*
 // @match        https://outlook.office365.com/*
@@ -19,7 +19,7 @@
   const TOGGLE_ID = 'tm-aipro-toggle';
   const IFRAME_ID = 'tm-aipro-iframe';
   const APP_ORIGIN = 'https://pro.ai.ny.gov';
-  const SYNC_KEY = 'tm_aipro_auth_heartbeat';
+  const SYNC_KEY = 'tm_aipro_session_transfer';
 
   // 1. Inject UI Styles
   GM_addStyle(`
@@ -36,52 +36,58 @@
   // =========================================================================
   if (window.location.hostname === 'pro.ai.ny.gov') {
     
-    // --- POPUP LOGIC ---
+    // --- POPUP LOGIC: Mirror Session to LocalStorage ---
     if (window.opener) {
-      const monitorPopup = () => {
-        // Detect if we are likely logged in:
-        // 1. We see a textarea OR 2. The URL no longer contains login/auth keywords
-        const hasInput = !!document.querySelector('textarea, [contenteditable="true"]');
-        const isAuthUrl = window.location.href.includes('code=') || window.location.href.includes('state=') || window.location.href.includes('login');
+      const syncSessionToStorage = () => {
+        const msalKeys = Object.keys(sessionStorage).filter(key => key.includes('msal') || key.includes('login'));
         
-        // If we have an input OR we are on the base app URL without auth strings...
-        if (hasInput || (!isAuthUrl && window.location.pathname.length <= 1)) {
-          console.log('[AI Pro Popup] Success detected. Pinging sidepanel.');
-          localStorage.setItem(SYNC_KEY, Date.now().toString());
+        if (msalKeys.length > 0 && !!document.querySelector('textarea, [contenteditable="true"]')) {
+          console.log('[AI Pro Popup] Found MSAL tokens. Mirroring to Iframe...');
           
-          // Give it a moment to ensure the sidepanel sees the storage event before closing
-          setTimeout(() => {
-              window.close();
-          }, 1000);
+          const sessionData = {};
+          msalKeys.forEach(k => sessionData[k] = sessionStorage.getItem(k));
+          
+          // Write the entire session to a shared LocalStorage key
+          localStorage.setItem(SYNC_KEY, JSON.stringify({
+            timestamp: Date.now(),
+            data: sessionData
+          }));
+          
+          setTimeout(() => window.close(), 800);
         }
       };
-      
-      setInterval(monitorPopup, 1000);
+      setInterval(syncSessionToStorage, 1000);
       return;
     }
 
-    // --- IFRAME LOGIC (Sidepanel) ---
+    // --- IFRAME LOGIC: Inject Mirror and Reload ---
     if (window !== window.top) {
-      // Listen for the heartbeat from the popup
-      window.addEventListener('storage', (event) => {
-        if (event.key === SYNC_KEY) {
-          console.log('[AI Pro Iframe] Heartbeat received. Refreshing...');
-          window.location.reload();
+      const handleSync = (event) => {
+        if (event.key === SYNC_KEY && event.newValue) {
+          try {
+            const { data } = JSON.parse(event.newValue);
+            console.log('[AI Pro Iframe] Injecting tokens into session...');
+            
+            // Inject all tokens from the popup into the iframe's session
+            Object.keys(data).forEach(k => sessionStorage.setItem(k, data[k]));
+            
+            // Critical: Stop the current redirect loop and reload
+            window.location.reload();
+          } catch (e) { console.error('Sync failed', e); }
         }
-      });
+      };
 
-      // Backup: check storage on a timer in case the 'storage' event misses
-      let lastHeartbeat = localStorage.getItem(SYNC_KEY);
-      setInterval(() => {
-          const currentHeartbeat = localStorage.getItem(SYNC_KEY);
-          if (currentHeartbeat && currentHeartbeat !== lastHeartbeat) {
-              window.location.reload();
-          }
-      }, 2000);
+      window.addEventListener('storage', handleSync);
 
-      // Error screen override
+      // UI Intervention: Catch the error message and show our "Unlock" button
       const errorObserver = new MutationObserver(() => {
-        if (document.body.innerText.includes('Authentication Failed') || document.body.innerText.includes('redirect_in_iframe')) {
+        const bodyText = document.body.innerText;
+        if (bodyText.includes('Authentication Failed') || bodyText.includes('redirect_in_iframe')) {
+          // Check if we already have tokens first
+          if (Object.keys(sessionStorage).some(k => k.includes('msal'))) {
+             // If we have tokens but still see an error, the app might just need one more refresh
+             return; 
+          }
           injectLoginButton();
           errorObserver.disconnect();
         }
@@ -92,9 +98,9 @@
         const container = document.createElement('div');
         container.className = 'tm-login-container';
         container.innerHTML = `
-          <h3 style="margin:0">Authentication Required</h3>
-          <p style="color:#666">Your session is restricted in the sidepanel.</p>
-          <button class="tm-login-button">Unlock AI Pro</button>
+          <h3 style="margin:0">Authentication Blocked</h3>
+          <p style="color:#666; font-size:14px; margin-top:10px;">Microsoft prevents login inside side-panels. Click below to authorize securely.</p>
+          <button class="tm-login-button">Authorize AI Pro</button>
         `;
         container.querySelector('button').onclick = () => {
           window.open(window.location.href, 'aipro_auth_popup', 'width=600,height=750');
@@ -122,7 +128,7 @@
     const iframe = document.createElement('iframe');
     iframe.id = IFRAME_ID;
     iframe.src = APP_ORIGIN;
-    iframe.allow = "popups; clipboard-write";
+    iframe.allow = "popups; clipboard-write; clipboard-read";
 
     panel.appendChild(iframe);
     document.body.appendChild(panel);
@@ -130,6 +136,14 @@
 
     toggle.onclick = () => {
       panel.classList.toggle('open');
+      if (panel.classList.contains('open') && iframe.contentWindow) {
+          // Send context
+          const ctx = {
+            subject: document.querySelector('[role="heading"]')?.textContent || '',
+            selectedText: window.getSelection()?.toString() || ''
+          };
+          iframe.contentWindow.postMessage({ type: 'AI_PRO_CONTEXT_V1', payload: ctx }, APP_ORIGIN);
+      }
     };
   };
 
