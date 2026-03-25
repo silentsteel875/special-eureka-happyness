@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         Outlook Web + AI Pro sidepanel bridge (Token Injection)
+// @name         Outlook Web + AI Pro sidepanel bridge (Force Bootstrap)
 // @namespace    https://pro.ai.ny.gov/
-// @version      1.1.0
-// @description  Bypasses MSAL session limits by mirroring tokens from popup to iframe.
+// @version      1.2.0
+// @description  Forces the AI Pro app to re-bootstrap from the root once tokens are injected.
 // @author       You
 // @match        https://outlook.office.com/*
 // @match        https://outlook.office365.com/*
@@ -36,57 +36,51 @@
   // =========================================================================
   if (window.location.hostname === 'pro.ai.ny.gov') {
     
-    // --- POPUP LOGIC: Mirror Session to LocalStorage ---
+    // --- POPUP LOGIC ---
     if (window.opener) {
       const syncSessionToStorage = () => {
         const msalKeys = Object.keys(sessionStorage).filter(key => key.includes('msal') || key.includes('login'));
+        const hasAppUI = !!document.querySelector('textarea, [contenteditable="true"]');
         
-        if (msalKeys.length > 0 && !!document.querySelector('textarea, [contenteditable="true"]')) {
-          console.log('[AI Pro Popup] Found MSAL tokens. Mirroring to Iframe...');
-          
+        if (msalKeys.length > 0 && hasAppUI) {
           const sessionData = {};
           msalKeys.forEach(k => sessionData[k] = sessionStorage.getItem(k));
           
-          // Write the entire session to a shared LocalStorage key
           localStorage.setItem(SYNC_KEY, JSON.stringify({
             timestamp: Date.now(),
             data: sessionData
           }));
           
-          setTimeout(() => window.close(), 800);
+          setTimeout(() => window.close(), 1000);
         }
       };
       setInterval(syncSessionToStorage, 1000);
       return;
     }
 
-    // --- IFRAME LOGIC: Inject Mirror and Reload ---
+    // --- IFRAME LOGIC ---
     if (window !== window.top) {
-      const handleSync = (event) => {
+      window.addEventListener('storage', (event) => {
         if (event.key === SYNC_KEY && event.newValue) {
           try {
             const { data } = JSON.parse(event.newValue);
-            console.log('[AI Pro Iframe] Injecting tokens into session...');
+            console.log('[AI Pro Iframe] Auth found. Synchronizing and forcing bootstrap...');
             
-            // Inject all tokens from the popup into the iframe's session
             Object.keys(data).forEach(k => sessionStorage.setItem(k, data[k]));
             
-            // Critical: Stop the current redirect loop and reload
-            window.location.reload();
+            // Instead of reload(), force navigate to the root to restart the app
+            // We add a "ts" param to bypass any cached error pages
+            window.location.href = APP_ORIGIN + '/?auth_sync=' + Date.now();
           } catch (e) { console.error('Sync failed', e); }
         }
-      };
+      });
 
-      window.addEventListener('storage', handleSync);
-
-      // UI Intervention: Catch the error message and show our "Unlock" button
       const errorObserver = new MutationObserver(() => {
-        const bodyText = document.body.innerText;
-        if (bodyText.includes('Authentication Failed') || bodyText.includes('redirect_in_iframe')) {
-          // Check if we already have tokens first
+        if (document.body.innerText.includes('Authentication Failed') || document.body.innerText.includes('redirect_in_iframe')) {
+          // If we ALREADY have tokens, don't show the button, just force a reset
           if (Object.keys(sessionStorage).some(k => k.includes('msal'))) {
-             // If we have tokens but still see an error, the app might just need one more refresh
-             return; 
+              window.location.href = APP_ORIGIN + '/?auth_retry=' + Date.now();
+              return;
           }
           injectLoginButton();
           errorObserver.disconnect();
@@ -98,9 +92,9 @@
         const container = document.createElement('div');
         container.className = 'tm-login-container';
         container.innerHTML = `
-          <h3 style="margin:0">Authentication Blocked</h3>
-          <p style="color:#666; font-size:14px; margin-top:10px;">Microsoft prevents login inside side-panels. Click below to authorize securely.</p>
-          <button class="tm-login-button">Authorize AI Pro</button>
+          <h3 style="margin:0">AI Pro Restricted</h3>
+          <p style="color:#666; font-size:14px; margin:10px 0 20px;">Side-panels require a secure login bridge.</p>
+          <button class="tm-login-button">Authorize & Launch</button>
         `;
         container.querySelector('button').onclick = () => {
           window.open(window.location.href, 'aipro_auth_popup', 'width=600,height=750');
@@ -137,7 +131,6 @@
     toggle.onclick = () => {
       panel.classList.toggle('open');
       if (panel.classList.contains('open') && iframe.contentWindow) {
-          // Send context
           const ctx = {
             subject: document.querySelector('[role="heading"]')?.textContent || '',
             selectedText: window.getSelection()?.toString() || ''
