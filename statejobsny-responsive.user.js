@@ -1,13 +1,14 @@
 // ==UserScript==
 // @name         StateJobsNY responsive/full-width layout
 // @namespace    https://statejobsny.com/
-// @version      3.1.0
+// @version      3.2.0
 // @description  Makes StateJobsNY public and employee pages use the full viewport with configurable page settings.
 // @author       You
 // @match        https://statejobsny.com/public/*
 // @match        https://statejobsny.com/employees/*
 // @match        https://statejobs.ny.gov/public/*
 // @match        https://statejobs.ny.gov/employees/*
+// @match        https://alfred.camera/webapp/viewer*
 // @run-at       document-idle
 // @grant        none
 // ==/UserScript==
@@ -26,12 +27,18 @@
   const COMPARE_BUTTON_ID = 'tm-statejobsny-compare-button';
   const CLEAR_BUTTON_ID = 'tm-statejobsny-clear-button';
   const COMPARE_ERROR_ID = 'tm-statejobsny-compare-error';
+  const JUST_FOR_FUN_BUTTON_ID = 'tm-statejobsny-just-for-fun';
   const DEBUG_KEY = 'tm-statejobsny-debug';
+  const STRIPE_PALETTE = ['#eee', '#ecdfff', '#ffe0f3', '#d8dcff', '#ddffce', '#fff6c1'];
 
   const DEFAULT_SETTINGS = {
     responsiveLayout: true,
     widenAgencyColumn: false,
     highlightDeadlineApproaching: false,
+    deadlinePulse: false,
+    tableFontFamily: '',
+    tableFontSizePx: 12,
+    stripeColor: '#eee',
     defaultEntriesPerPage: '100',
     previewHoverDelayMs: 220,
   };
@@ -79,8 +86,11 @@
   let compareValidationMessage = '';
   let closeDeadlineFilterActive = false;
   let vacancyRefreshScheduled = false;
+  let funModeActive = false;
+  let funModeTimer = null;
 
   const isVacancyTablePage = () => Boolean(document.getElementById('vacancyTable'));
+  const isAlfredViewerPage = () => /:\/\/alfred\.camera\/webapp\/viewer/i.test(window.location.href);
 
   const isDebugEnabled = () => {
     try {
@@ -147,6 +157,52 @@
     applyState();
   };
 
+  const suppressAlfredSupportModal = () => {
+    const hideModal = (modalRoot) => {
+      if (!(modalRoot instanceof HTMLElement)) return;
+      modalRoot.style.setProperty('display', 'none', 'important');
+      modalRoot.setAttribute('aria-hidden', 'true');
+      modalRoot.remove();
+    };
+
+    const clearPageLock = () => {
+      if (document.body) {
+        document.body.style.overflow = '';
+      }
+      const root = document.getElementById('root');
+      if (root) {
+        root.removeAttribute('aria-hidden');
+      }
+    };
+
+    const scanAndSuppress = () => {
+      let removed = false;
+      document.querySelectorAll('[role="presentation"].MuiDialog-root, .MuiModal-root').forEach((modalRoot) => {
+        const title = modalRoot.querySelector('#form-dialog-title, .MuiDialogTitle-root');
+        const bodyText = modalRoot.textContent || '';
+        const matchesSupportModal =
+          /Alfred Needs Your Support!/i.test(title ? title.textContent || '' : '') ||
+          (/ad-blocker|whitelist us|disable the ad-blocker|Alfred Premium/i.test(bodyText) && /DISMISS|UPGRADE/i.test(bodyText));
+
+        if (!matchesSupportModal) return;
+        hideModal(modalRoot);
+        removed = true;
+      });
+
+      if (removed) {
+        clearPageLock();
+      }
+    };
+
+    const observer = new MutationObserver(() => {
+      scanAndSuppress();
+    });
+
+    scanAndSuppress();
+    observer.observe(document.documentElement, { childList: true, subtree: true });
+    window.addEventListener('load', scanAndSuppress);
+  };
+
   const ensureStyle = () => {
     let style = document.getElementById(STYLE_ID);
     if (style) return style;
@@ -177,6 +233,14 @@
       #vacancyTable { width:100% !important; max-width:100% !important; margin:0 !important; table-layout:auto !important; }
       #vacancyTable th, #vacancyTable td { white-space:normal !important; overflow-wrap:anywhere !important; vertical-align:middle !important; }
       #vacancyTable tbody td { padding:1px 3px !important; }
+      #vacancyTable.tm-font-custom th, #vacancyTable.tm-font-custom td {
+        font-family: var(--tm-table-font-family, inherit) !important;
+      }
+      #vacancyTable.tm-font-custom-size th, #vacancyTable.tm-font-custom-size td {
+        font-size: var(--tm-table-font-size, 12px) !important;
+      }
+      #vacancyTable tbody tr.odd td { background-color: var(--tm-stripe-odd, #eee) !important; }
+      #vacancyTable tbody tr.even td { background-color: var(--tm-stripe-even, #fff) !important; }
       #vacancyTable .tm-compare-cell, #vacancyTable .tm-compare-header { width:1% !important; text-align:center !important; white-space:nowrap !important; }
       #vacancyTable th:nth-child(2), #vacancyTable td:nth-child(2),
       #vacancyTable th:nth-child(4), #vacancyTable td:nth-child(4),
@@ -240,8 +304,26 @@
       #${COMPARE_OVERLAY_ID} .tm-compare-body { overflow:auto; max-height:calc(80vh - 48px); padding:8px; }
       #${COMPARE_OVERLAY_ID} table { width:100%; border-collapse:collapse; }
       #${COMPARE_OVERLAY_ID} th, #${COMPARE_OVERLAY_ID} td { border:1px solid #ddd; padding:6px; vertical-align:top; text-align:left; }
+      #${COMPARE_OVERLAY_ID} .tm-compare-controls { margin:0 0 8px; }
+      #${COMPARE_BUTTON_ID}, #${CLEAR_BUTTON_ID} { margin-left:8px !important; }
+      #${COMPARE_ERROR_ID} { margin-top:6px !important; color:#8b0000 !important; font-size:12px !important; }
+      #tm-close-deadline-link { display:inline-block; margin-top:4px; }
 
       .tm-urgent-deadline { color:#8b0000 !important; font-weight:600 !important; }
+      #vacancyTable td.tm-deadline-pulse {
+        animation: tm-deadline-pulse 1.25s ease-in-out infinite;
+        font-weight:700 !important;
+      }
+      @keyframes tm-deadline-pulse {
+        0%, 100% { background-color: var(--tm-deadline-base, transparent) !important; color: #8b0000 !important; }
+        50% { background-color: #8b0000 !important; color: #fff !important; }
+      }
+      .tm-close-deadline-row-hidden { display:none !important; }
+      .tm-stripe-color-picker {
+        appearance:none; -webkit-appearance:none; width:72px; height:24px; border:1px solid #888; border-radius:4px;
+        padding:0; cursor:pointer;
+      }
+      .tm-stripe-color-picker option { color: transparent; }
 
       @media (max-width: 980px) {
         #mainContent { grid-template-columns:minmax(0, 1fr) !important; grid-template-areas:"header" "nav" "content" "organ" "footer" !important; row-gap:12px !important; }
@@ -388,6 +470,78 @@
       row.classList.remove('odd', 'even');
       row.classList.add(index % 2 === 0 ? 'odd' : 'even');
     });
+    applyStripeColor();
+  };
+
+  const applyTableTypography = () => {
+    const table = document.getElementById('vacancyTable');
+    if (!table) return;
+    const font = (settings.tableFontFamily || '').trim();
+    const size = Math.max(10, Math.min(24, Number(settings.tableFontSizePx) || 12));
+    table.classList.toggle('tm-font-custom', Boolean(font));
+    table.classList.toggle('tm-font-custom-size', true);
+    table.style.setProperty('--tm-table-font-family', font || 'inherit');
+    table.style.setProperty('--tm-table-font-size', `${size}px`);
+  };
+
+  const applyStripeColor = () => {
+    const table = document.getElementById('vacancyTable');
+    if (!table) return;
+    const odd = STRIPE_PALETTE.includes(settings.stripeColor) ? settings.stripeColor : '#eee';
+    table.style.setProperty('--tm-stripe-odd', odd);
+    table.style.setProperty('--tm-stripe-even', '#fff');
+  };
+
+  const stopFunModeAnimation = () => {
+    if (funModeTimer) {
+      window.clearInterval(funModeTimer);
+      funModeTimer = null;
+    }
+    funModeActive = false;
+    const button = document.getElementById(JUST_FOR_FUN_BUTTON_ID);
+    if (button) {
+      button.textContent = 'just for fun';
+      button.setAttribute('aria-pressed', 'false');
+    }
+    document.querySelectorAll('#vacancyTable tbody td').forEach((cell) => {
+      cell.style.removeProperty('background-color');
+      cell.style.removeProperty('color');
+    });
+    normalizeVacancyRowStriping();
+    applyDeadlineStyling();
+  };
+
+  const startFunModeAnimation = () => {
+    if (!isVacancyTablePage()) return;
+    funModeActive = true;
+    const button = document.getElementById(JUST_FOR_FUN_BUTTON_ID);
+    if (button) {
+      button.textContent = 'just for fun (on)';
+      button.setAttribute('aria-pressed', 'true');
+    }
+
+    const animateFrame = () => {
+      const cells = Array.from(document.querySelectorAll('#vacancyTable tbody td'));
+      const t = Date.now() / 850;
+      cells.forEach((cell, i) => {
+        const hue = (Math.sin((i % 9) + t) * 70 + Math.cos((i / 5) + t * 0.7) * 40 + 220 + (i % 7) * 8 + t * 26) % 360;
+        const sat = 78;
+        const light = 88 - (Math.sin(t + (i / 11)) + 1) * 8;
+        cell.style.setProperty('background-color', `hsl(${Math.round(hue)}, ${sat}%, ${Math.round(light)}%)`, 'important');
+        cell.style.setProperty('color', '#3b1b4e', 'important');
+      });
+    };
+
+    animateFrame();
+    funModeTimer = window.setInterval(animateFrame, 220);
+  };
+
+  const toggleFunModeAnimation = () => {
+    if (funModeActive) {
+      stopFunModeAnimation();
+      return;
+    }
+    startFunModeAnimation();
   };
 
   const applyAgencyColumnMode = () => {
@@ -403,6 +557,7 @@
     const link = document.getElementById('tm-close-deadline-link');
     if (!link) return;
     link.textContent = closeDeadlineFilterActive ? 'All Postings' : 'Close to Deadline Postings';
+    link.setAttribute('aria-pressed', String(closeDeadlineFilterActive));
   };
 
   const applyCloseDeadlineFilter = () => {
@@ -431,6 +586,7 @@
     link.href = '#';
     link.id = 'tm-close-deadline-link';
     link.textContent = 'Close to Deadline Postings';
+    link.setAttribute('aria-pressed', 'false');
     link.addEventListener('click', (event) => {
       event.preventDefault();
       closeDeadlineFilterActive = !closeDeadlineFilterActive;
@@ -448,6 +604,18 @@
       document.querySelectorAll(`#vacancyTable tbody tr td:nth-child(${deadlineIdx})`).forEach((cell) => {
         const apply = settings.highlightDeadlineApproaching && isApproachingDate(cell.textContent);
         cell.classList.toggle('tm-urgent-deadline', apply);
+        const dueDate = parseDate(cell.textContent);
+        const now = new Date();
+        now.setHours(0, 0, 0, 0);
+        const isToday = dueDate && dueDate.getTime() === now.getTime();
+        if (settings.deadlinePulse && isToday) {
+          const baseColor = window.getComputedStyle(cell).backgroundColor || 'transparent';
+          cell.style.setProperty('--tm-deadline-base', baseColor);
+          cell.classList.add('tm-deadline-pulse');
+        } else {
+          cell.classList.remove('tm-deadline-pulse');
+          cell.style.removeProperty('--tm-deadline-base');
+        }
       });
     }
 
@@ -529,6 +697,16 @@
         <label class="tm-settings-row"><input type="checkbox" id="tm-setting-agency"> Widen Agency column</label>
         <div class="tm-settings-note">Recommended: leave off if you want to avoid accidental width changes.</div>
         <label class="tm-settings-row"><input type="checkbox" id="tm-setting-deadline"> Is Deadline Approaching</label>
+        <label class="tm-settings-row"><input type="checkbox" id="tm-setting-deadline-pulse"> Deadline Pulse</label>
+        <label class="tm-settings-row">Table Font family:
+          <input id="tm-setting-font-family" type="text" placeholder="inherit" style="width:200px;">
+        </label>
+        <label class="tm-settings-row">Table Font size (px):
+          <input id="tm-setting-font-size" type="number" min="10" max="24" step="1" style="width:90px;">
+        </label>
+        <label class="tm-settings-row">Stripe color:
+          <select id="tm-setting-stripe-color" class="tm-stripe-color-picker"></select>
+        </label>
         <label class="tm-settings-row">Default Entries per Page:
           <select id="tm-setting-length"></select>
         </label>
@@ -545,10 +723,29 @@
     modal.querySelector('#tm-setting-responsive').addEventListener('change', (e) => updateSetting('responsiveLayout', e.target.checked));
     modal.querySelector('#tm-setting-agency').addEventListener('change', (e) => updateSetting('widenAgencyColumn', e.target.checked));
     modal.querySelector('#tm-setting-deadline').addEventListener('change', (e) => updateSetting('highlightDeadlineApproaching', e.target.checked));
+    modal.querySelector('#tm-setting-deadline-pulse').addEventListener('change', (e) => updateSetting('deadlinePulse', e.target.checked));
+    modal.querySelector('#tm-setting-font-family').addEventListener('input', (e) => updateSetting('tableFontFamily', e.target.value || ''));
+    modal.querySelector('#tm-setting-font-size').addEventListener('input', (e) => {
+      const next = Math.max(10, Math.min(24, Number(e.target.value) || 12));
+      updateSetting('tableFontSizePx', next);
+    });
+    modal.querySelector('#tm-setting-stripe-color').addEventListener('change', (e) => {
+      e.target.style.backgroundColor = e.target.value;
+      updateSetting('stripeColor', e.target.value);
+    });
     modal.querySelector('#tm-setting-length').addEventListener('change', (e) => updateSetting('defaultEntriesPerPage', e.target.value));
     modal.querySelector('#tm-setting-hover-delay').addEventListener('input', (e) => {
       const next = Math.max(0, Math.min(5000, Number(e.target.value) || 0));
       updateSetting('previewHoverDelayMs', next);
+    });
+
+    const stripeSelect = modal.querySelector('#tm-setting-stripe-color');
+    STRIPE_PALETTE.forEach((color) => {
+      const option = document.createElement('option');
+      option.value = color;
+      option.textContent = ' ';
+      option.style.backgroundColor = color;
+      stripeSelect.appendChild(option);
     });
 
     return modal;
@@ -585,6 +782,11 @@
     modal.querySelector('#tm-setting-responsive').checked = settings.responsiveLayout;
     modal.querySelector('#tm-setting-agency').checked = settings.widenAgencyColumn;
     modal.querySelector('#tm-setting-deadline').checked = settings.highlightDeadlineApproaching;
+    modal.querySelector('#tm-setting-deadline-pulse').checked = settings.deadlinePulse;
+    modal.querySelector('#tm-setting-font-family').value = settings.tableFontFamily || '';
+    modal.querySelector('#tm-setting-font-size').value = String(settings.tableFontSizePx || 12);
+    modal.querySelector('#tm-setting-stripe-color').value = STRIPE_PALETTE.includes(settings.stripeColor) ? settings.stripeColor : '#eee';
+    modal.querySelector('#tm-setting-stripe-color').style.backgroundColor = modal.querySelector('#tm-setting-stripe-color').value;
     modal.querySelector('#tm-setting-hover-delay').value = String(settings.previewHoverDelayMs);
     modal.style.display = 'block';
     syncSettingsDefaultLengthSelect();
@@ -613,6 +815,30 @@
     const insertAfter = otherListingsLink ? otherListingsLink.closest('li') : navList.lastElementChild;
     if (insertAfter && insertAfter.parentElement === navList) insertAfter.insertAdjacentElement('afterend', li);
     else navList.appendChild(li);
+  };
+
+  const ensureJustForFunButton = () => {
+    if (document.getElementById(JUST_FOR_FUN_BUTTON_ID)) return;
+    const nav = document.getElementById('nav');
+    if (!nav) return;
+
+    const button = document.createElement('button');
+    button.id = JUST_FOR_FUN_BUTTON_ID;
+    button.type = 'button';
+    button.textContent = 'just for fun';
+    button.setAttribute('aria-pressed', 'false');
+    button.style.marginTop = '6px';
+    button.style.padding = '3px 8px';
+    button.addEventListener('click', () => {
+      toggleFunModeAnimation();
+    });
+
+    const helpfulSection = Array.from(nav.querySelectorAll('.navSection, h3, h4, p, div')).find((node) => /Helpful Links/i.test(node.textContent || ''));
+    if (helpfulSection) {
+      helpfulSection.insertAdjacentElement('afterend', button);
+      return;
+    }
+    nav.appendChild(button);
   };
 
   const ensurePreviewBox = () => {
@@ -907,6 +1133,14 @@
     }
   };
 
+  const getComparisonTitle = (url) => {
+    const input = document.querySelector(`.tm-compare-checkbox[data-compare-url="${CSS.escape(url)}"]`);
+    const row = input ? input.closest('tr') : null;
+    const titleLink = row ? row.querySelector('td a[href*="vacancyDetailsView.cfm"]') : null;
+    const title = titleLink ? titleLink.textContent.replace(/\s+/g, ' ').trim() : '';
+    return title || url;
+  };
+
   const renderComparisonTable = (body, valid) => {
     const allKeys = new Set();
     valid.forEach((item) => Object.keys(item.data).forEach((k) => allKeys.add(k)));
@@ -923,7 +1157,7 @@
     const table = document.createElement('table');
     const head = document.createElement('thead');
     const trh = document.createElement('tr');
-    trh.innerHTML = '<th>Field</th>' + valid.map((_, i) => `<th>Selection ${i + 1}</th>`).join('');
+    trh.innerHTML = '<th>Field</th>' + valid.map((item, i) => `<th title="${getComparisonTitle(item.url)}">Selection ${i + 1}: ${getComparisonTitle(item.url)}</th>`).join('');
     head.appendChild(trh);
     table.appendChild(head);
 
@@ -988,6 +1222,38 @@
     updateCompareButtonState();
   };
 
+  const resetVacancyUiState = () => {
+    closeDeadlineFilterActive = false;
+    selectedCompareUrls.clear();
+    compareValidationMessage = '';
+
+    document.querySelectorAll('.tm-close-deadline-row-hidden').forEach((row) => {
+      row.classList.remove('tm-close-deadline-row-hidden');
+    });
+
+    const link = document.getElementById('tm-close-deadline-link');
+    if (link) {
+      link.textContent = 'Close to Deadline Postings';
+      link.setAttribute('aria-pressed', 'false');
+    }
+
+    document.querySelectorAll('.tm-compare-checkbox').forEach((input) => {
+      input.checked = false;
+      input.setCustomValidity('');
+      input.removeAttribute('aria-invalid');
+    });
+    document.querySelectorAll('#vacancyTable td.tm-deadline-pulse').forEach((cell) => {
+      cell.classList.remove('tm-deadline-pulse');
+      cell.style.removeProperty('--tm-deadline-base');
+    });
+
+    const error = document.getElementById(COMPARE_ERROR_ID);
+    if (error) {
+      error.textContent = '';
+      error.style.display = 'none';
+    }
+  };
+
   const ensureCompareButton = () => {
     if (!isVacancyTablePage()) return;
     const lengthWrap = document.querySelector('#vacancyTable_wrapper .dt-length');
@@ -1050,6 +1316,7 @@
       const t0 = performance.now();
       vacancyRefreshScheduled = false;
       normalizeVacancyRowStriping();
+      applyTableTypography();
       applyAgencyColumnMode();
       applyDeadlineStyling();
       ensureCompareColumn();
@@ -1121,6 +1388,7 @@
     if (stripeObserver) stripeObserver.disconnect();
     if (!enabled || !isVacancyTablePage()) return;
     normalizeVacancyRowStriping();
+    applyTableTypography();
     applyAgencyColumnMode();
     applyDeadlineStyling();
     ensureCompareColumn();
@@ -1156,12 +1424,16 @@
       startStripeObserver();
       applyMobileNavState();
       applyAgencyColumnMode();
+      applyTableTypography();
       applyDeadlineStyling();
       ensureCloseDeadlineLink();
+      ensureJustForFunButton();
       wireTitleHoverPreview();
       ensureGradeAscendingSort();
       updateCompareButtonState();
     } else {
+      stopFunModeAnimation();
+      resetVacancyUiState();
       removeStyle();
       stopLengthObserver();
       stopStripeObserver();
@@ -1176,7 +1448,13 @@
     }
   };
 
+  if (isAlfredViewerPage()) {
+    suppressAlfredSupportModal();
+    return;
+  }
+
   insertSettingsEntryInNav();
+  ensureJustForFunButton();
   ensureBaseUiStyle();
   ensureSettingsModal();
   logDebug('bootstrap', { href: location.href, enabled });
