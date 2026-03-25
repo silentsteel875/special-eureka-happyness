@@ -88,9 +88,14 @@
   let vacancyRefreshScheduled = false;
   let funModeActive = false;
   let funModeTimer = null;
+  let deadlinePulseTimer = null;
 
   const isVacancyTablePage = () => Boolean(document.getElementById('vacancyTable'));
   const isAlfredViewerPage = () => /:\/\/alfred\.camera\/webapp\/viewer/i.test(window.location.href);
+  const isSettingsModalOpen = () => {
+    const modal = document.getElementById(SETTINGS_MODAL_ID);
+    return Boolean(modal && modal.style.display !== 'none');
+  };
 
   const isDebugEnabled = () => {
     try {
@@ -258,9 +263,11 @@
       #vacancyTable.tm-agency-wide th:nth-child(3), #vacancyTable.tm-agency-wide td:nth-child(3) { min-width:clamp(240px, 30vw, 520px) !important; }
       #vacancyTable_wrapper .dt-paging.paging_full_numbers {
         display:flex !important;
-        flex-wrap:wrap !important;
+        flex-wrap:nowrap !important;
         align-items:center !important;
+        justify-content:center !important;
         gap:4px !important;
+        width:100% !important;
       }
       #vacancyTable_wrapper .dt-paging.paging_full_numbers button,
       #vacancyTable_wrapper .dt-paging.paging_full_numbers span {
@@ -311,12 +318,7 @@
 
       .tm-urgent-deadline { color:#8b0000 !important; font-weight:600 !important; }
       #vacancyTable td.tm-deadline-pulse {
-        animation: tm-deadline-pulse 1.25s ease-in-out infinite;
         font-weight:700 !important;
-      }
-      @keyframes tm-deadline-pulse {
-        0%, 100% { background-color: var(--tm-deadline-base, transparent) !important; color: #8b0000 !important; }
-        50% { background-color: #8b0000 !important; color: #fff !important; }
       }
       .tm-close-deadline-row-hidden { display:none !important; }
       .tm-stripe-color-picker {
@@ -482,6 +484,7 @@
     table.classList.toggle('tm-font-custom-size', true);
     table.style.setProperty('--tm-table-font-family', font || 'inherit');
     table.style.setProperty('--tm-table-font-size', `${size}px`);
+    applyGradeSalaryFontSize();
   };
 
   const applyStripeColor = () => {
@@ -490,6 +493,80 @@
     const odd = STRIPE_PALETTE.includes(settings.stripeColor) ? settings.stripeColor : '#eee';
     table.style.setProperty('--tm-stripe-odd', odd);
     table.style.setProperty('--tm-stripe-even', '#fff');
+  };
+
+  const stopDeadlinePulseTimer = () => {
+    if (deadlinePulseTimer) {
+      window.clearInterval(deadlinePulseTimer);
+      deadlinePulseTimer = null;
+    }
+  };
+
+  const tickDeadlinePulse = () => {
+    const now = Date.now();
+    const active = Math.floor(now / 650) % 2 === 0;
+    document.querySelectorAll('#vacancyTable td.tm-deadline-pulse').forEach((cell) => {
+      const baseColor = cell.dataset.tmPulseBaseColor || window.getComputedStyle(cell).backgroundColor || 'transparent';
+      if (active) {
+        cell.style.setProperty('background-color', '#8b0000', 'important');
+        cell.style.setProperty('color', '#fff', 'important');
+      } else {
+        cell.style.setProperty('background-color', baseColor, 'important');
+        cell.style.setProperty('color', '#8b0000', 'important');
+      }
+    });
+  };
+
+  const ensureDeadlinePulseTimer = () => {
+    stopDeadlinePulseTimer();
+    if (!settings.deadlinePulse || !enabled || !isVacancyTablePage()) return;
+    tickDeadlinePulse();
+    deadlinePulseTimer = window.setInterval(tickDeadlinePulse, 650);
+  };
+
+  const formatSalaryK = (value) => `$${Math.max(0, Math.ceil(value / 1000))}k`;
+
+  const extractSalaryRangeFromHtml = (htmlText) => {
+    const text = htmlText.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
+    const fromMatch = text.match(/From[^$\d]*\$?\s*([\d,]+(?:\.\d+)?)/i);
+    const toMatch = text.match(/To[^$\d]*\$?\s*([\d,]+(?:\.\d+)?)/i);
+    const parseNum = (raw) => Number(String(raw || '').replace(/,/g, ''));
+    const from = parseNum(fromMatch && fromMatch[1]);
+    const to = parseNum(toMatch && toMatch[1]);
+    if (Number.isFinite(from) && Number.isFinite(to) && from > 0 && to > 0) {
+      return `${formatSalaryK(from)}-${formatSalaryK(to)}`;
+    }
+    return '';
+  };
+
+  const applyGradeSalaryFontSize = () => {
+    const px = Math.max(8, (Math.max(10, Math.min(24, Number(settings.tableFontSizePx) || 12)) - 2));
+    document.querySelectorAll('.tm-grade-salary-range').forEach((el) => {
+      el.style.fontSize = `${px}px`;
+    });
+  };
+
+  const augmentGradeColumnWithSalary = async () => {
+    if (!enabled || !isVacancyTablePage() || funModeActive) return;
+    const gradeIdx = getColumnIndexByHeader('Grade');
+    if (!gradeIdx) return;
+    const rows = Array.from(document.querySelectorAll('#vacancyTable tbody tr'));
+    for (const row of rows) {
+      const titleLink = row.querySelector('td a[href*="vacancyDetailsView.cfm"]');
+      const gradeCell = row.children[gradeIdx - 1];
+      if (!titleLink || !gradeCell || gradeCell.dataset.tmSalaryBound === '1') continue;
+      gradeCell.dataset.tmSalaryBound = '1';
+      const html = await loadPreviewContent(titleLink.href);
+      const range = extractSalaryRangeFromHtml(html);
+      if (!range) continue;
+      const span = document.createElement('span');
+      span.className = 'tm-grade-salary-range';
+      span.style.display = 'block';
+      span.style.lineHeight = '1.2';
+      span.textContent = range;
+      gradeCell.appendChild(span);
+    }
+    applyGradeSalaryFontSize();
   };
 
   const stopFunModeAnimation = () => {
@@ -509,6 +586,7 @@
     });
     normalizeVacancyRowStriping();
     applyDeadlineStyling();
+    ensureDeadlinePulseTimer();
   };
 
   const startFunModeAnimation = () => {
@@ -581,10 +659,10 @@
     });
     if (!yesterdayLink || !yesterdayLink.parentElement) return;
 
-    const wrapper = document.createElement('div');
     const link = document.createElement('a');
     link.href = '#';
     link.id = 'tm-close-deadline-link';
+    link.style.marginLeft = '8px';
     link.textContent = 'Close to Deadline Postings';
     link.setAttribute('aria-pressed', 'false');
     link.addEventListener('click', (event) => {
@@ -593,8 +671,7 @@
       updateCloseDeadlineLink();
       applyCloseDeadlineFilter();
     });
-    wrapper.appendChild(link);
-    yesterdayLink.parentElement.insertAdjacentElement('afterend', wrapper);
+    yesterdayLink.parentElement.appendChild(link);
   };
 
   const applyDeadlineStyling = () => {
@@ -609,12 +686,13 @@
         now.setHours(0, 0, 0, 0);
         const isToday = dueDate && dueDate.getTime() === now.getTime();
         if (settings.deadlinePulse && isToday) {
-          const baseColor = window.getComputedStyle(cell).backgroundColor || 'transparent';
-          cell.style.setProperty('--tm-deadline-base', baseColor);
+          cell.dataset.tmPulseBaseColor = window.getComputedStyle(cell).backgroundColor || 'transparent';
           cell.classList.add('tm-deadline-pulse');
         } else {
           cell.classList.remove('tm-deadline-pulse');
-          cell.style.removeProperty('--tm-deadline-base');
+          delete cell.dataset.tmPulseBaseColor;
+          cell.style.removeProperty('background-color');
+          cell.style.removeProperty('color');
         }
       });
     }
@@ -633,6 +711,7 @@
 
     applyCloseDeadlineFilter();
     updateCloseDeadlineLink();
+    ensureDeadlinePulseTimer();
   };
 
   const ensureGradeAscendingSort = () => {
@@ -694,25 +773,33 @@
       </div>
       <div class="tm-settings-body">
         <label class="tm-settings-row"><input type="checkbox" id="tm-setting-responsive"> Responsive layout</label>
+        <div class="tm-settings-note">Uses the full viewport and responsive grid layout for main content.</div>
         <label class="tm-settings-row"><input type="checkbox" id="tm-setting-agency"> Widen Agency column</label>
         <div class="tm-settings-note">Recommended: leave off if you want to avoid accidental width changes.</div>
         <label class="tm-settings-row"><input type="checkbox" id="tm-setting-deadline"> Is Deadline Approaching</label>
+        <div class="tm-settings-note">Highlights deadlines that are due within 3 days.</div>
         <label class="tm-settings-row"><input type="checkbox" id="tm-setting-deadline-pulse"> Deadline Pulse</label>
+        <div class="tm-settings-note">For deadlines due today, pulse between red and the row color.</div>
         <label class="tm-settings-row">Table Font family:
           <input id="tm-setting-font-family" type="text" placeholder="inherit" style="width:200px;">
         </label>
+        <div class="tm-settings-note">Example: Arial, "Open Sans", Georgia, monospace.</div>
         <label class="tm-settings-row">Table Font size (px):
           <input id="tm-setting-font-size" type="number" min="10" max="24" step="1" style="width:90px;">
         </label>
+        <div class="tm-settings-note">Also controls Grade salary-range helper text at 2px smaller.</div>
         <label class="tm-settings-row">Stripe color:
           <select id="tm-setting-stripe-color" class="tm-stripe-color-picker"></select>
         </label>
+        <div class="tm-settings-note">Select a row stripe tint from the color-only dropdown.</div>
         <label class="tm-settings-row">Default Entries per Page:
           <select id="tm-setting-length"></select>
         </label>
+        <div class="tm-settings-note">Automatically applies after table load.</div>
         <label class="tm-settings-row">Job Specifics Preview hover delay (milliseconds):
           <input id="tm-setting-hover-delay" type="number" min="0" max="5000" step="10" style="width:120px;">
         </label>
+        <div class="tm-settings-note">Lower numbers make previews appear faster on hover.</div>
       </div>
     `;
     document.body.appendChild(modal);
@@ -779,6 +866,9 @@
 
   const openSettingsModal = () => {
     const modal = ensureSettingsModal();
+    hidePreviewBox();
+    const compareOverlay = document.getElementById(COMPARE_OVERLAY_ID);
+    if (compareOverlay) compareOverlay.style.display = 'none';
     modal.querySelector('#tm-setting-responsive').checked = settings.responsiveLayout;
     modal.querySelector('#tm-setting-agency').checked = settings.widenAgencyColumn;
     modal.querySelector('#tm-setting-deadline').checked = settings.highlightDeadlineApproaching;
@@ -918,6 +1008,22 @@
     previewPinnedPosition = { left, top };
   };
 
+  const clampPreviewToViewport = () => {
+    const box = document.getElementById(PREVIEW_BOX_ID);
+    if (!box || box.style.display === 'none') return;
+    const pad = 8;
+    const rect = box.getBoundingClientRect();
+    let left = rect.left;
+    let top = rect.top;
+    if (rect.right > window.innerWidth - pad) left = Math.max(pad, window.innerWidth - rect.width - pad);
+    if (rect.bottom > window.innerHeight - pad) top = Math.max(pad, window.innerHeight - rect.height - pad);
+    if (rect.left < pad) left = pad;
+    if (rect.top < pad) top = pad;
+    box.style.left = `${left}px`;
+    box.style.top = `${top}px`;
+    previewPinnedPosition = { left, top };
+  };
+
   const extractSectionBlocks = (section, fallbackText) => {
     if (!section) return `<em>${fallbackText}</em>`;
     const blocks = [];
@@ -983,6 +1089,7 @@
       };
 
       link.addEventListener('mouseenter', (event) => {
+        if (isSettingsModalOpen()) return;
         cancelPendingHover();
         const token = hoverToken;
         const start = performance.now();
@@ -1010,6 +1117,7 @@
           }
           if (token === hoverToken && box.style.display !== 'none' && body) {
             body.innerHTML = content;
+            clampPreviewToViewport();
           }
         };
 
@@ -1190,6 +1298,7 @@
   };
 
   const openComparisonOverlay = async () => {
+    if (isSettingsModalOpen()) return;
     const selected = Array.from(selectedCompareUrls);
     if (selected.length < 2 || selected.length > 3) {
       updateCompareButtonState();
@@ -1244,7 +1353,9 @@
     });
     document.querySelectorAll('#vacancyTable td.tm-deadline-pulse').forEach((cell) => {
       cell.classList.remove('tm-deadline-pulse');
-      cell.style.removeProperty('--tm-deadline-base');
+      delete cell.dataset.tmPulseBaseColor;
+      cell.style.removeProperty('background-color');
+      cell.style.removeProperty('color');
     });
 
     const error = document.getElementById(COMPARE_ERROR_ID);
@@ -1322,6 +1433,7 @@
       ensureCompareColumn();
       ensureCompareButton();
       ensureCloseDeadlineLink();
+      augmentGradeColumnWithSalary();
       wireTitleHoverPreview();
       const elapsed = performance.now() - t0;
       debugState.vacancyRefreshRuns += 1;
@@ -1393,6 +1505,7 @@
     applyDeadlineStyling();
     ensureCompareColumn();
     ensureCompareButton();
+    augmentGradeColumnWithSalary();
 
     const tbody = document.querySelector('#vacancyTable tbody');
     if (!tbody) return;
@@ -1432,6 +1545,7 @@
       ensureGradeAscendingSort();
       updateCompareButtonState();
     } else {
+      stopDeadlinePulseTimer();
       stopFunModeAnimation();
       resetVacancyUiState();
       removeStyle();
@@ -1460,4 +1574,5 @@
   logDebug('bootstrap', { href: location.href, enabled });
   applyState();
   window.addEventListener('resize', applyMobileNavState);
+  window.addEventListener('resize', clampPreviewToViewport);
 })();
