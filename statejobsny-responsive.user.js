@@ -315,6 +315,7 @@
       #${COMPARE_BUTTON_ID}, #${CLEAR_BUTTON_ID} { margin-left:8px !important; }
       #${COMPARE_ERROR_ID} { margin-top:6px !important; color:#8b0000 !important; font-size:12px !important; }
       #tm-close-deadline-link { display:inline-block; margin-top:4px; }
+      img[src*="rss24.png"] { margin-left:5px !important; }
 
       .tm-urgent-deadline { color:#8b0000 !important; font-weight:600 !important; }
       #vacancyTable td.tm-deadline-pulse {
@@ -524,7 +525,7 @@
     deadlinePulseTimer = window.setInterval(tickDeadlinePulse, 650);
   };
 
-  const formatSalaryK = (value) => `$${Math.max(0, Math.ceil(value / 1000))}k`;
+  const formatSalaryK = (value) => `$${Math.max(0, Math.round(value / 1000))}k`;
 
   const extractSalaryRangeFromHtml = (htmlText) => {
     const text = htmlText.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
@@ -662,7 +663,6 @@
     const link = document.createElement('a');
     link.href = '#';
     link.id = 'tm-close-deadline-link';
-    link.style.marginLeft = '8px';
     link.textContent = 'Close to Deadline Postings';
     link.setAttribute('aria-pressed', 'false');
     link.addEventListener('click', (event) => {
@@ -671,6 +671,7 @@
       updateCloseDeadlineLink();
       applyCloseDeadlineFilter();
     });
+    yesterdayLink.parentElement.appendChild(document.createElement('br'));
     yesterdayLink.parentElement.appendChild(link);
   };
 
