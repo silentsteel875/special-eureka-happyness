@@ -1,14 +1,13 @@
 // ==UserScript==
 // @name         StateJobsNY responsive/full-width layout
 // @namespace    https://statejobsny.com/
-// @version      3.2.0
+// @version      3.2.1
 // @description  Makes StateJobsNY public and employee pages use the full viewport with configurable page settings.
 // @author       You
 // @match        https://statejobsny.com/public/*
 // @match        https://statejobsny.com/employees/*
 // @match        https://statejobs.ny.gov/public/*
 // @match        https://statejobs.ny.gov/employees/*
-// @match        https://alfred.camera/webapp/viewer*
 // @run-at       document-idle
 // @grant        none
 // ==/UserScript==
@@ -81,6 +80,7 @@
   let previewPinnedPosition = null;
   let previewIsDragging = false;
   const previewCache = new Map();
+  const previewRawCache = new Map();
   const compareCache = new Map();
   const selectedCompareUrls = new Set();
   let compareValidationMessage = '';
@@ -91,10 +91,9 @@
   let deadlinePulseTimer = null;
 
   const isVacancyTablePage = () => Boolean(document.getElementById('vacancyTable'));
-  const isAlfredViewerPage = () => /:\/\/alfred\.camera\/webapp\/viewer/i.test(window.location.href);
   const isSettingsModalOpen = () => {
     const modal = document.getElementById(SETTINGS_MODAL_ID);
-    return Boolean(modal && modal.style.display !== 'none');
+    return Boolean(modal && window.getComputedStyle(modal).display !== 'none');
   };
 
   const isDebugEnabled = () => {
@@ -160,52 +159,6 @@
     saveSettings();
     defaultLengthApplied = false;
     applyState();
-  };
-
-  const suppressAlfredSupportModal = () => {
-    const hideModal = (modalRoot) => {
-      if (!(modalRoot instanceof HTMLElement)) return;
-      modalRoot.style.setProperty('display', 'none', 'important');
-      modalRoot.setAttribute('aria-hidden', 'true');
-      modalRoot.remove();
-    };
-
-    const clearPageLock = () => {
-      if (document.body) {
-        document.body.style.overflow = '';
-      }
-      const root = document.getElementById('root');
-      if (root) {
-        root.removeAttribute('aria-hidden');
-      }
-    };
-
-    const scanAndSuppress = () => {
-      let removed = false;
-      document.querySelectorAll('[role="presentation"].MuiDialog-root, .MuiModal-root').forEach((modalRoot) => {
-        const title = modalRoot.querySelector('#form-dialog-title, .MuiDialogTitle-root');
-        const bodyText = modalRoot.textContent || '';
-        const matchesSupportModal =
-          /Alfred Needs Your Support!/i.test(title ? title.textContent || '' : '') ||
-          (/ad-blocker|whitelist us|disable the ad-blocker|Alfred Premium/i.test(bodyText) && /DISMISS|UPGRADE/i.test(bodyText));
-
-        if (!matchesSupportModal) return;
-        hideModal(modalRoot);
-        removed = true;
-      });
-
-      if (removed) {
-        clearPageLock();
-      }
-    };
-
-    const observer = new MutationObserver(() => {
-      scanAndSuppress();
-    });
-
-    scanAndSuppress();
-    observer.observe(document.documentElement, { childList: true, subtree: true });
-    window.addEventListener('load', scanAndSuppress);
   };
 
   const ensureStyle = () => {
@@ -527,13 +480,29 @@
 
   const formatSalaryK = (value) => `$${Math.max(0, Math.round(value / 1000))}k`;
 
+  const parseMoneyTextToNumber = (valueText) => {
+    const numericText = String(valueText || '').replace(/[^0-9.]/g, '');
+    const parsed = Number(numericText);
+    return Number.isFinite(parsed) ? parsed : NaN;
+  };
+
   const extractSalaryRangeFromHtml = (htmlText) => {
-    const text = htmlText.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
-    const fromMatch = text.match(/From[^$\d]*\$?\s*([\d,]+(?:\.\d+)?)/i);
-    const toMatch = text.match(/To[^$\d]*\$?\s*([\d,]+(?:\.\d+)?)/i);
-    const parseNum = (raw) => Number(String(raw || '').replace(/,/g, ''));
-    const from = parseNum(fromMatch && fromMatch[1]);
-    const to = parseNum(toMatch && toMatch[1]);
+    const doc = new DOMParser().parseFromString(htmlText, 'text/html');
+    let from = NaN;
+    let to = NaN;
+
+    doc.querySelectorAll('#jobspecifics p.row, #information p.row, #content p.row').forEach((row) => {
+      const left = row.querySelector('.leftCol');
+      const right = row.querySelector('.rightCol');
+      if (!left || !right) return;
+      const label = left.textContent.replace(/\s+/g, ' ').trim().replace(/:$/, '').toLowerCase();
+      if (label === 'from') {
+        from = parseMoneyTextToNumber(right.textContent);
+      } else if (label === 'to') {
+        to = parseMoneyTextToNumber(right.textContent);
+      }
+    });
+
     if (Number.isFinite(from) && Number.isFinite(to) && from > 0 && to > 0) {
       return `${formatSalaryK(from)}-${formatSalaryK(to)}`;
     }
@@ -557,7 +526,7 @@
       const gradeCell = row.children[gradeIdx - 1];
       if (!titleLink || !gradeCell || gradeCell.dataset.tmSalaryBound === '1') continue;
       gradeCell.dataset.tmSalaryBound = '1';
-      const html = await loadPreviewContent(titleLink.href);
+      const html = await loadRawPreviewHtml(titleLink.href);
       const range = extractSalaryRangeFromHtml(html);
       if (!range) continue;
       const span = document.createElement('span');
@@ -1050,18 +1019,26 @@
     return `<div class="tm-preview-tab-title">Job Specifics</div>${jobSpecifics}<div class="tm-preview-tab-title">Basics</div>${basics}`;
   };
 
-  const loadPreviewContent = async (url) => {
-    if (previewCache.has(url)) return previewCache.get(url);
+  const loadRawPreviewHtml = async (url) => {
+    if (previewRawCache.has(url)) return previewRawCache.get(url);
     try {
       const response = await fetch(url, { credentials: 'include' });
-      if (!response.ok) return '<em>Preview could not be loaded.</em>';
+      if (!response.ok) return '';
       const html = await response.text();
-      const extracted = extractPreviewHtml(html);
-      previewCache.set(url, extracted);
-      return extracted;
+      previewRawCache.set(url, html);
+      return html;
     } catch (_e) {
-      return '<em>Preview could not be loaded.</em>';
+      return '';
     }
+  };
+
+  const loadPreviewContent = async (url) => {
+    if (previewCache.has(url)) return previewCache.get(url);
+    const html = await loadRawPreviewHtml(url);
+    if (!html) return '<em>Preview could not be loaded.</em>';
+    const extracted = extractPreviewHtml(html);
+    previewCache.set(url, extracted);
+    return extracted;
   };
 
   const wireTitleHoverPreview = () => {
@@ -1562,11 +1539,6 @@
       applyMobileNavState();
     }
   };
-
-  if (isAlfredViewerPage()) {
-    suppressAlfredSupportModal();
-    return;
-  }
 
   insertSettingsEntryInNav();
   ensureJustForFunButton();
