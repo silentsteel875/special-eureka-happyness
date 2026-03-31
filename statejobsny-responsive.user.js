@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         StateJobsNY responsive/full-width layout
 // @namespace    https://statejobsny.com/
-// @version      3.2.1
+// @version      3.2.2
 // @description  Makes StateJobsNY public and employee pages use the full viewport with configurable page settings.
 // @author       You
 // @match        https://statejobsny.com/public/*
@@ -89,6 +89,10 @@
   let funModeActive = false;
   let funModeTimer = null;
   let deadlinePulseTimer = null;
+  let salaryLazyBound = false;
+  let salaryLazyTickScheduled = false;
+  let salaryLazyLoading = false;
+  const salaryRangeCache = new Map();
 
   const isVacancyTablePage = () => Boolean(document.getElementById('vacancyTable'));
   const isSettingsModalOpen = () => {
@@ -488,21 +492,22 @@
 
   const extractSalaryRangeFromHtml = (htmlText) => {
     const doc = new DOMParser().parseFromString(htmlText, 'text/html');
-    let from = NaN;
-    let to = NaN;
+    let salaryText = '';
 
-    doc.querySelectorAll('#jobspecifics p.row, #information p.row, #content p.row').forEach((row) => {
+    doc.querySelectorAll('#information p.row, #content p.row').forEach((row) => {
       const left = row.querySelector('.leftCol');
       const right = row.querySelector('.rightCol');
       if (!left || !right) return;
       const label = left.textContent.replace(/\s+/g, ' ').trim().replace(/:$/, '').toLowerCase();
-      if (label === 'from') {
-        from = parseMoneyTextToNumber(right.textContent);
-      } else if (label === 'to') {
-        to = parseMoneyTextToNumber(right.textContent);
+      if (label === 'salary range') {
+        salaryText = right.textContent.replace(/\s+/g, ' ').trim();
       }
     });
 
+    const match = salaryText.match(/From\s*\$?\s*([\d,]+(?:\.\d+)?)\s*to\s*\$?\s*([\d,]+(?:\.\d+)?)/i);
+    if (!match) return '';
+    const from = parseMoneyTextToNumber(match[1]);
+    const to = parseMoneyTextToNumber(match[2]);
     if (Number.isFinite(from) && Number.isFinite(to) && from > 0 && to > 0) {
       return `${formatSalaryK(from)}-${formatSalaryK(to)}`;
     }
@@ -516,27 +521,74 @@
     });
   };
 
+  const getVacancyRowsNearViewport = () => {
+    const rows = Array.from(document.querySelectorAll('#vacancyTable tbody tr'));
+    if (!rows.length) return [];
+    const viewportTop = 0;
+    const viewportBottom = window.innerHeight;
+    let firstVisible = rows.findIndex((row) => {
+      const rect = row.getBoundingClientRect();
+      return rect.bottom >= viewportTop && rect.top <= viewportBottom;
+    });
+    if (firstVisible < 0) firstVisible = 0;
+    let lastVisible = firstVisible;
+    for (let i = firstVisible; i < rows.length; i += 1) {
+      const rect = rows[i].getBoundingClientRect();
+      if (rect.top > viewportBottom) break;
+      lastVisible = i;
+    }
+    const from = Math.max(0, firstVisible - 10);
+    const to = Math.min(rows.length - 1, lastVisible + 10);
+    return rows.slice(from, to + 1);
+  };
+
   const augmentGradeColumnWithSalary = async () => {
-    if (!enabled || !isVacancyTablePage() || funModeActive) return;
+    if (!enabled || !isVacancyTablePage() || funModeActive || salaryLazyLoading) return;
     const gradeIdx = getColumnIndexByHeader('Grade');
     if (!gradeIdx) return;
-    const rows = Array.from(document.querySelectorAll('#vacancyTable tbody tr'));
+    salaryLazyLoading = true;
+    const rows = getVacancyRowsNearViewport();
     for (const row of rows) {
       const titleLink = row.querySelector('td a[href*="vacancyDetailsView.cfm"]');
       const gradeCell = row.children[gradeIdx - 1];
-      if (!titleLink || !gradeCell || gradeCell.dataset.tmSalaryBound === '1') continue;
+      if (!titleLink || !gradeCell || gradeCell.dataset.tmSalaryBound === '1') {
+        continue;
+      }
+      const url = titleLink.href;
+      let range = salaryRangeCache.get(url);
+      if (typeof range === 'undefined') {
+        const html = await loadRawPreviewHtml(url);
+        range = extractSalaryRangeFromHtml(html);
+        salaryRangeCache.set(url, range || '');
+      }
       gradeCell.dataset.tmSalaryBound = '1';
-      const html = await loadRawPreviewHtml(titleLink.href);
-      const range = extractSalaryRangeFromHtml(html);
-      if (!range) continue;
-      const span = document.createElement('span');
-      span.className = 'tm-grade-salary-range';
-      span.style.display = 'block';
-      span.style.lineHeight = '1.2';
-      span.textContent = range;
-      gradeCell.appendChild(span);
+      if (range) {
+        const span = document.createElement('span');
+        span.className = 'tm-grade-salary-range';
+        span.style.display = 'block';
+        span.style.lineHeight = '1.2';
+        span.textContent = range;
+        gradeCell.appendChild(span);
+      }
     }
     applyGradeSalaryFontSize();
+    salaryLazyLoading = false;
+  };
+
+  const scheduleLazySalaryLoad = () => {
+    if (salaryLazyTickScheduled) return;
+    salaryLazyTickScheduled = true;
+    window.requestAnimationFrame(() => {
+      salaryLazyTickScheduled = false;
+      augmentGradeColumnWithSalary();
+    });
+  };
+
+  const bindLazySalaryLoader = () => {
+    if (salaryLazyBound) return;
+    salaryLazyBound = true;
+    window.addEventListener('scroll', scheduleLazySalaryLoad, { passive: true });
+    window.addEventListener('resize', scheduleLazySalaryLoad);
   };
 
   const stopFunModeAnimation = () => {
@@ -1411,7 +1463,8 @@
       ensureCompareColumn();
       ensureCompareButton();
       ensureCloseDeadlineLink();
-      augmentGradeColumnWithSalary();
+      bindLazySalaryLoader();
+      scheduleLazySalaryLoad();
       wireTitleHoverPreview();
       const elapsed = performance.now() - t0;
       debugState.vacancyRefreshRuns += 1;
@@ -1483,7 +1536,8 @@
     applyDeadlineStyling();
     ensureCompareColumn();
     ensureCompareButton();
-    augmentGradeColumnWithSalary();
+    bindLazySalaryLoader();
+    scheduleLazySalaryLoad();
 
     const tbody = document.querySelector('#vacancyTable tbody');
     if (!tbody) return;
