@@ -492,19 +492,20 @@
 
   const extractSalaryRangeFromHtml = (htmlText) => {
     const doc = new DOMParser().parseFromString(htmlText, 'text/html');
-    let salaryText = '';
-
-    doc.querySelectorAll('#information p.row, #content p.row').forEach((row) => {
+    const basicsPanel = doc.querySelector('#information');
+    if (!basicsPanel) return '';
+    const salaryRow = Array.from(basicsPanel.querySelectorAll('p.row')).find((row) => {
       const left = row.querySelector('.leftCol');
-      const right = row.querySelector('.rightCol');
-      if (!left || !right) return;
-      const label = left.textContent.replace(/\s+/g, ' ').trim().replace(/:$/, '').toLowerCase();
-      if (label === 'salary range') {
-        salaryText = right.textContent.replace(/\s+/g, ' ').trim();
-      }
+      if (!left) return false;
+      const label = left.textContent.replace(/\s+/g, ' ').trim().replace(/:$/, '');
+      return /^salary range$/i.test(label);
     });
+    if (!salaryRow) return '';
+    const salaryRight = salaryRow.querySelector('.rightCol');
+    if (!salaryRight) return '';
+    const salaryText = salaryRight.textContent.replace(/\s+/g, ' ').trim();
 
-    const match = salaryText.match(/From\s*\$?\s*([\d,]+(?:\.\d+)?)\s*to\s*\$?\s*([\d,]+(?:\.\d+)?)/i);
+    const match = salaryText.match(/From\s*\$?\s*([\d,]+(?:\.\d+)?)\s*to\s*\$?\s*([\d,]+(?:\.\d+)?)\s*Annually/i);
     if (!match) return '';
     const from = parseMoneyTextToNumber(match[1]);
     const to = parseMoneyTextToNumber(match[2]);
