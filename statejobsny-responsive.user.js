@@ -92,6 +92,7 @@
   let salaryLazyBound = false;
   let salaryLazyTickScheduled = false;
   let salaryLazyLoading = false;
+  let salaryLazyPoller = null;
   const salaryRangeCache = new Map();
   const salaryLazyListeners = [];
 
@@ -626,6 +627,23 @@
     bind(document, 'scroll');
     bind(document.getElementById('content'), 'scroll');
     bind(document.querySelector('#vacancyTable_wrapper .dt-layout-table'), 'scroll');
+    logDebug('salary lazy listeners bound', salaryLazyListeners.map((item) => item.eventName));
+  };
+
+  const startLazySalaryPoller = () => {
+    if (salaryLazyPoller) return;
+    salaryLazyPoller = window.setInterval(() => {
+      if (!enabled || !isVacancyTablePage() || funModeActive) return;
+      scheduleLazySalaryLoad();
+    }, 900);
+    logDebug('salary lazy poller started');
+  };
+
+  const stopLazySalaryPoller = () => {
+    if (!salaryLazyPoller) return;
+    window.clearInterval(salaryLazyPoller);
+    salaryLazyPoller = null;
+    logDebug('salary lazy poller stopped');
   };
 
   const stopFunModeAnimation = () => {
@@ -1501,6 +1519,7 @@
       ensureCompareButton();
       ensureCloseDeadlineLink();
       bindLazySalaryLoader();
+      startLazySalaryPoller();
       scheduleLazySalaryLoad();
       wireTitleHoverPreview();
       const elapsed = performance.now() - t0;
@@ -1574,6 +1593,7 @@
     ensureCompareColumn();
     ensureCompareButton();
     bindLazySalaryLoader();
+    startLazySalaryPoller();
     scheduleLazySalaryLoad();
 
     const tbody = document.querySelector('#vacancyTable tbody');
@@ -1615,6 +1635,7 @@
       updateCompareButtonState();
     } else {
       stopDeadlinePulseTimer();
+      stopLazySalaryPoller();
       stopFunModeAnimation();
       resetVacancyUiState();
       removeStyle();
