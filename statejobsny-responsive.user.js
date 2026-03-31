@@ -115,6 +115,12 @@
     vacancyRefreshRuns: 0,
     hoverPreviewLoads: 0,
     lastVacancyRefreshMs: 0,
+    salaryLazySchedules: 0,
+    salaryRowsConsidered: 0,
+    salaryRowsLoaded: 0,
+    salaryLastViewportRange: '',
+    salaryLastRawText: '',
+    salaryLastExtractedRange: '',
   };
 
   const logDebug = (...args) => {
@@ -505,14 +511,22 @@
     const salaryRight = salaryRow.querySelector('.rightCol');
     if (!salaryRight) return '';
     const salaryText = salaryRight.textContent.replace(/\s+/g, ' ').trim();
+    debugState.salaryLastRawText = salaryText;
 
     const match = salaryText.match(/From\s*\$?\s*([\d,]+(?:\.\d+)?)\s*to\s*\$?\s*([\d,]+(?:\.\d+)?)\s*Annually/i);
-    if (!match) return '';
+    if (!match) {
+      logDebugWarn('salary parse miss: salary range text did not match expected pattern', salaryText);
+      return '';
+    }
     const from = parseMoneyTextToNumber(match[1]);
     const to = parseMoneyTextToNumber(match[2]);
     if (Number.isFinite(from) && Number.isFinite(to) && from > 0 && to > 0) {
-      return `${formatSalaryK(from)}-${formatSalaryK(to)}`;
+      const range = `${formatSalaryK(from)}-${formatSalaryK(to)}`;
+      debugState.salaryLastExtractedRange = range;
+      logDebug('salary parse hit', { from, to, range });
+      return range;
     }
+    logDebugWarn('salary parse miss: parsed values were invalid', { from, to, salaryText });
     return '';
   };
 
@@ -541,6 +555,8 @@
     }
     const from = Math.max(0, firstVisible - 10);
     const to = Math.min(rows.length - 1, lastVisible + 10);
+    debugState.salaryLastViewportRange = `${from}-${to}`;
+    logDebug('salary viewport window', { firstVisible, lastVisible, prefetchFrom: from, prefetchTo: to, totalRows: rows.length });
     return rows.slice(from, to + 1);
   };
 
@@ -551,6 +567,8 @@
     salaryLazyLoading = true;
     try {
       const rows = getVacancyRowsNearViewport();
+      debugState.salaryRowsConsidered += rows.length;
+      logDebug('salary lazy load tick', { considered: rows.length, viewportRange: debugState.salaryLastViewportRange });
       for (const row of rows) {
         const titleLink = row.querySelector('td a[href*="vacancyDetailsView.cfm"]');
         const gradeCell = row.children[gradeIdx - 1];
@@ -572,6 +590,10 @@
           span.textContent = range;
           gradeCell.appendChild(span);
           gradeCell.dataset.tmSalaryBound = '1';
+          debugState.salaryRowsLoaded += 1;
+          logDebug('salary helper applied', { url, range, totalLoaded: debugState.salaryRowsLoaded });
+        } else {
+          logDebugWarn('salary helper missing for row', { url });
         }
       }
       applyGradeSalaryFontSize();
@@ -585,6 +607,8 @@
     salaryLazyTickScheduled = true;
     window.requestAnimationFrame(() => {
       salaryLazyTickScheduled = false;
+      debugState.salaryLazySchedules += 1;
+      logDebug('scheduleLazySalaryLoad fired', { count: debugState.salaryLazySchedules });
       augmentGradeColumnWithSalary();
     });
   };
