@@ -10,6 +10,8 @@
 // @match        https://teams.microsoft.com/dl/launcher/launcher.html*
 // @grant        window.close
 // @run-at       document-start
+// @updateURL    https://github.com/silentsteel875/special-eureka-happyness/raw/refs/heads/main/meeting-launcher-autoclose.user.js
+// @downloadURL  https://github.com/silentsteel875/special-eureka-happyness/raw/refs/heads/main/meeting-launcher-autoclose.user.js
 // ==/UserScript==
 
 (function () {
