@@ -7,6 +7,8 @@
 // @match        https://its.ny.gov/policies*
 // @grant        GM_addStyle
 // @run-at       document-idle
+// @updateURL    https://github.com/silentsteel875/special-eureka-happyness/raw/refs/heads/main/ItsPoliciesViewer.user.js
+// @downloadURL  https://github.com/silentsteel875/special-eureka-happyness/raw/refs/heads/main/ItsPoliciesViewer.user.js
 // ==/UserScript==
 
 (async function() {
