@@ -7,6 +7,8 @@
 // @match        https://alfred.camera/webapp/viewer/device/58b0706437d9dc302f02532b80373858/live
 // @icon         https://www.google.com/s2/favicons?sz=64&domain=alfred.camera
 // @grant        none
+// @updateURL    https://github.com/silentsteel875/special-eureka-happyness/raw/refs/heads/main/AlfredCamera.user.js
+// @downloadURL  https://github.com/silentsteel875/special-eureka-happyness/raw/refs/heads/main/AlfredCamera.user.js
 // ==/UserScript==
 
 (function () {
