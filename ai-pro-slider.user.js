@@ -10,6 +10,8 @@
 // @grant        GM_setValue
 // @grant        GM_getValue
 // @run-at       document-start
+// @updateURL    https://github.com/silentsteel875/special-eureka-happyness/raw/refs/heads/main/ai-pro-slider.user.js
+// @downloadURL  https://github.com/silentsteel875/special-eureka-happyness/raw/refs/heads/main/ai-pro-slider.user.js
 // ==/UserScript==
 
 (function() {
