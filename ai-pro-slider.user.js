@@ -1,11 +1,12 @@
 // ==UserScript==
-// @name         AI Pro - The Puppet Master (v7.2.0 Contextual SDK)
+// @name         AI Pro - The Puppet Master (v8.1.0 Ecosystem Polish)
 // @namespace    https://pro.ai.ny.gov/
-// @version      7.2.0
-// @description  Pure Heist SDK with animated, context-aware dynamic stacking buttons.
+// @version      8.1.0
+// @description  Bidirectional resizer, Max 50vw limits, Z-Index fixes, and 2-level Compose menus.
 // @match        https://outlook.office.com/*
 // @match        https://outlook.office365.com/*
 // @match        https://outlook.cloud.microsoft/*
+// @match        https://*.sharepoint.com/*
 // @match        https://pro.ai.ny.gov/*
 // @grant        GM_setValue
 // @grant        GM_getValue
@@ -22,17 +23,15 @@
     // ==========================================================================
     if (window.location.hostname === 'pro.ai.ny.gov') {
         if (window.opener && window.top === window.self) {
-            console.log("👻 [Popup] Searching for MSAL tokens...");
             const scrapeInterval = setInterval(() => {
-                const hasTokens = Object.keys(sessionStorage).some(k => k.toLowerCase().includes('accesstoken')) || 
-                                  Object.keys(localStorage).some(k => k.toLowerCase().includes('accesstoken'));
+                const hasTokens = Object.keys(sessionStorage).some(k => k.toLowerCase().includes('accesstoken')) || Object.keys(localStorage).some(k => k.toLowerCase().includes('accesstoken'));
                 if (hasTokens) {
                     clearInterval(scrapeInterval);
                     const cache = { session: {}, local: {} };
                     for (let i = 0; i < sessionStorage.length; i++) cache.session[sessionStorage.key(i)] = sessionStorage.getItem(sessionStorage.key(i));
                     for (let i = 0; i < localStorage.length; i++) cache.local[localStorage.key(i)] = localStorage.getItem(localStorage.key(i));
                     GM_setValue('ai_pro_msal_vault', JSON.stringify(cache));
-                    setTimeout(() => window.close(), 1000); 
+                    setTimeout(() => window.close(), 1000);
                 }
             }, 500);
         }
@@ -53,7 +52,7 @@
 
             window.addEventListener('load', () => {
                 const prompt = GM_getValue('ai_pro_pending_prompt');
-                if (!prompt) return; 
+                if (!prompt) return;
                 const typeInt = setInterval(() => {
                     const box = document.querySelector('textarea, [placeholder*="message" i], [placeholder*="ask" i]');
                     if (box) {
@@ -61,16 +60,16 @@
                         const setter = Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value").set;
                         setter.call(box, prompt);
                         box.dispatchEvent(new Event('input', { bubbles: true}));
-                        GM_setValue('ai_pro_pending_prompt', ''); 
+                        GM_setValue('ai_pro_pending_prompt', '');
                     }
                 }, 500);
             });
         }
-        return; 
+        return;
     }
 
     // ==========================================================================
-    // PART 1: THE CORE SDK (AIProBridge Class - Pure Heist)
+    // PART 1: THE CORE SDK (AIProBridge Class)
     // ==========================================================================
     class AIProBridge {
         constructor(options = {}) {
@@ -78,10 +77,10 @@
             this.panelWidth = options.panelWidth || 450;
             this.containerId = 'ai-pro-sdk-container';
             this.isOpen = false;
-            
+
             this.storeData = options.storageSetter || function(k, v) { localStorage.setItem(k, v); };
             this.getData = options.storageGetter || function(k) { return localStorage.getItem(k); };
-            this.onStateChange = options.onStateChange || function(isOpen) {};
+            this.onStateChange = options.onStateChange || function(isOpen, width) {};
 
             this._init();
         }
@@ -90,6 +89,7 @@
             if (document.getElementById(this.containerId)) return;
             this._injectStyles();
             this._buildDOM();
+            this._setupResizer();
         }
 
         needsAuth() {
@@ -110,7 +110,7 @@
             this.isOpen = true;
             const cont = document.getElementById(this.containerId);
             if (cont) cont.style.right = "0px";
-            this.onStateChange(true);
+            this.onStateChange(true, this.panelWidth);
 
             if (this.needsAuth()) {
                 this._startAuthFlow(document.getElementById('ai-pro-sdk-iframe'), authWin);
@@ -121,14 +121,14 @@
             this.isOpen = false;
             const cont = document.getElementById(this.containerId);
             if (cont) cont.style.right = `-${this.panelWidth + 50}px`;
-            this.onStateChange(false);
+            this.onStateChange(false, this.panelWidth);
         }
 
         sendPrompt(promptText, authWin = null) {
             this.storeData('ai_pro_pending_prompt', promptText);
             this.open(authWin);
             const iframe = document.getElementById('ai-pro-sdk-iframe');
-            if (!this.needsAuth() && iframe) iframe.src = iframe.src; 
+            if (!this.needsAuth() && iframe) iframe.src = iframe.src;
         }
 
         _injectStyles() {
@@ -150,22 +150,65 @@
         _buildDOM() {
             const cont = document.createElement('div');
             cont.id = this.containerId;
-            cont.style.cssText = `position:fixed; top:0; right:-${this.panelWidth + 50}px; width:${this.panelWidth}px; height:100vh; background:#fff; box-shadow:-2px 0 10px rgba(0,0,0,0.1); z-index:999999; transition:right 0.3s ease; border-left:1px solid #e1dfdd;`;
-            
+            // Max 32-bit integer z-index to dominate Outlook's top nav
+            cont.style.cssText = `position:fixed; top:0; right:-${this.panelWidth + 50}px; width:${this.panelWidth}px; height:100vh; background:#fff; box-shadow:-4px 0 15px rgba(0,0,0,0.15); z-index:2147483647; transition:right 0.3s ease; border-left:1px solid #e1dfdd;`;
+
+            const resizer = document.createElement('div');
+            resizer.id = 'ai-pro-resizer';
+            resizer.style.cssText = `position:absolute; left:-3px; top:0; bottom:0; width:6px; cursor:ew-resize; z-index:11; background:transparent; transition:background 0.2s ease;`;
+            resizer.onmouseenter = () => resizer.style.background = 'rgba(0, 94, 162, 0.4)';
+            resizer.onmouseleave = () => resizer.style.background = 'transparent';
+            cont.appendChild(resizer);
+
             const loaderDiv = document.createElement('div');
             loaderDiv.innerHTML = `<div id="sdk-loader" class="sdk-loader-container" style="display:none;"><div class="sdk-spinner" id="sdk-spinner"></div><div id="sdk-status" class="sdk-status-text">Initializing...</div><progress id="sdk-progress" class="sdk-progress" max="100" value="0"></progress></div>`;
             cont.appendChild(loaderDiv);
 
             const iframe = document.createElement('iframe');
             iframe.id = 'ai-pro-sdk-iframe';
-            iframe.setAttribute('allow', 'clipboard-read; clipboard-write'); 
+            iframe.setAttribute('allow', 'clipboard-read; clipboard-write');
             iframe.style.cssText = "width:100%; height:100%; border:none; opacity:0; transition: opacity 0.4s ease;";
             cont.appendChild(iframe);
-            
+
             document.body.appendChild(cont);
         }
 
-        // --- PURE HEIST AUTH ---
+        _setupResizer() {
+            let isDragging = false;
+            const resizer = document.getElementById('ai-pro-resizer');
+            const cont = document.getElementById(this.containerId);
+            const iframe = document.getElementById('ai-pro-sdk-iframe');
+
+            resizer.addEventListener('mousedown', (e) => {
+                isDragging = true;
+                document.body.style.userSelect = 'none';
+                if (iframe) iframe.style.pointerEvents = 'none'; // Prevent iframe from stealing events
+                e.preventDefault();
+            });
+
+            document.addEventListener('mousemove', (e) => {
+                if (!isDragging) return;
+                let newWidth = window.innerWidth - e.clientX;
+                // Constraints: Shrink and Grow allowed, max 50% of viewport
+                newWidth = Math.max(350, Math.min(newWidth, window.innerWidth / 2));
+
+                this.panelWidth = newWidth;
+                cont.style.width = `${newWidth}px`;
+
+                if (this.isOpen) this.onStateChange(true, newWidth);
+            });
+
+            const stopDrag = () => {
+                if (isDragging) {
+                    isDragging = false;
+                    document.body.style.userSelect = '';
+                    if (iframe) iframe.style.pointerEvents = ''; // Restore interaction
+                }
+            };
+
+            document.addEventListener('mouseup', stopDrag);
+        }
+
         _startAuthFlow(iframeElement, win) {
             const loader = document.getElementById('sdk-loader');
             const spinner = document.getElementById('sdk-spinner');
@@ -177,11 +220,11 @@
             loader.style.display = 'flex';
             iframeElement.style.opacity = '0';
             spinner.style.display = 'block';
-            status.style.color = '#323130'; 
+            status.style.color = '#323130';
 
             const updateLoader = (msg, val) => { status.innerText = msg; prog.value = val; };
             updateLoader("Step 1 of 3: Opening secure popup...", 10);
-            this.storeData('ai_pro_msal_vault', ''); 
+            this.storeData('ai_pro_msal_vault', '');
 
             if (!win) return updateLoader("⚠️ Popup Blocked! Please allow popups.", 0) || (spinner.style.display = 'none', status.style.color = '#d83b01');
 
@@ -191,13 +234,13 @@
                 if (win.closed) {
                     clearInterval(poll);
                     const vault = this.getData('ai_pro_msal_vault');
-                    if (vault && vault.length > 10) { 
+                    if (vault && vault.length > 10) {
                         updateLoader("Step 3 of 3: Loading AI session...", 80);
-                        iframeElement.src = this.targetUrl; 
+                        iframeElement.src = this.targetUrl;
                         setTimeout(() => updateLoader("Almost ready...", 95), 1000);
                         setTimeout(() => {
                             updateLoader("Ready!", 100);
-                            setTimeout(() => { loader.style.display = 'none'; iframeElement.style.opacity = '1'; }, 400); 
+                            setTimeout(() => { loader.style.display = 'none'; iframeElement.style.opacity = '1'; }, 400);
                         }, 2500);
                     } else {
                         spinner.style.display = 'none'; status.style.color = '#d83b01'; updateLoader("⚠️ Authentication failed.", 0);
@@ -212,9 +255,9 @@
     }
 
     // ==========================================================================
-    // PART 2: THE CONSUMER APPLICATION (Outlook Implementation)
+    // PART 2: THE CONSUMER APPLICATION (Ecosystem Implementation)
     // ==========================================================================
-    
+
     function getCleanEmailBody() {
         let selectedText = window.getSelection().toString();
         if (selectedText && selectedText.trim() !== "") return selectedText;
@@ -235,45 +278,146 @@
         return raw.replace(/[\uFFFC\uFFFD\u200B-\u200F\u202A-\u202E\uFEFF]/g, "").replace(/[\x00-\x09\x0B-\x0C\x0E-\x1F\x7F-\x9F]/g, "").replace(/\xA0/g, " ").replace(/\r\n|\r|\u2028|\u2029/g, "\n").replace(/[ \t]+/g, " ").replace(/^ +| +$/gm, "").replace(/\n{3,}/g, "\n\n").trim();
     }
 
-    const BTNS = { TOGGLE: 'app-btn-toggle', REPLY: 'app-btn-reply', COMPOSE: 'app-btn-compose', MEETING: 'app-btn-meeting' };
+    const BTNS = { TOGGLE: 'app-btn-toggle', REPLY: 'app-btn-reply', COMPOSE: 'app-btn-compose', MEETING: 'app-btn-meeting', PEOPLE: 'app-btn-people', TODO: 'app-btn-todo', ONEDRIVE: 'app-btn-onedrive' };
 
+    // --- TEMPLATES ---
     const COMPOSE_TEMPLATES = [
-        { id: 'pm', icon: '📊', label: 'Status Update (PM)', prompt: 'a Project Status Update. Include sections for Current Progress, Blockers, and Next Steps.' },
-        { id: 'arch', icon: '🏗️', label: 'Arch Proposal', prompt: 'a Technical Architecture Proposal. Keep it high-level but structured.' },
-        { id: 'ba', icon: '📋', label: 'Req Sign-off (BA)', prompt: 'a Business Requirements Sign-off request for stakeholders.' },
-        { id: 'dev', icon: '💻', label: 'Code Review Request', prompt: 'a Code Review Request for a fellow developer. Include placeholders for PR link and key changes.' },
-        { id: 'mgr', icon: '📢', label: 'Team Update (Mgr)', prompt: 'a Team Update or Announcement. Keep the tone encouraging and professional.' },
-        { id: 'sup', icon: '🔥', label: 'Incident Escalation', prompt: 'an Incident Escalation Notice. Needs to be concise, factual, and denote urgency.' }
+        {
+            label: "Project Management", icon: "📊", items: [
+                { id: 'pm_stat', icon: '📈', label: 'Status Update', prompt: 'a Project Status Update.' },
+                { id: 'pm_steer', icon: '🧭', label: 'Steering Comm.', prompt: 'a Steering Committee Briefing.' }
+            ]
+        },
+        {
+            label: "Collaboration", icon: "🤝", items: [
+                { id: 'col_intro', icon: '👋', label: 'Team Intro', prompt: 'a Team Introduction email.' },
+                { id: 'col_ask', icon: '❓', label: 'Request Info', prompt: 'a polite request for information from another team.' }
+            ]
+        },
+        {
+            label: "Analysis & Design", icon: "📋", items: [
+                { id: 'ad_req', icon: '📝', label: 'Req Sign-off', prompt: 'a Business Requirements Sign-off request.' },
+                { id: 'ad_arch', icon: '🏗️', label: 'Arch Proposal', prompt: 'a Technical Architecture Proposal.' }
+            ]
+        },
+        {
+            label: "Development", icon: "💻", items: [
+                { id: 'dev_code', icon: '👀', label: 'Code Review', prompt: 'a Code Review Request.' },
+                { id: 'dev_merge', icon: '🔀', label: 'Merge Notice', prompt: 'a notification that code has been merged.' }
+            ]
+        },
+        {
+            label: "Quality Assurance", icon: "✅", items: [
+                { id: 'qa_bug', icon: '🐞', label: 'Bug Report', prompt: 'a detailed Bug Report email.' },
+                { id: 'qa_uat', icon: '👥', label: 'UAT Sign-off', prompt: 'a UAT Sign-off request.' }
+            ]
+        },
+        {
+            label: "Security", icon: "🔒", items: [
+                { id: 'sec_alert', icon: '🚨', label: 'Security Alert', prompt: 'a Security Alert or Notice.' },
+                { id: 'sec_audit', icon: '📋', label: 'Audit Request', prompt: 'a request for information regarding a Security Audit.' }
+            ]
+        },
+        {
+            label: "Release Mgmt", icon: "🚀", items: [
+                { id: 'rm_plan', icon: '📦', label: 'Release Notes', prompt: 'a Release Notes communication.' },
+                { id: 'rm_inc', icon: '🔥', label: 'Escalation', prompt: 'an Incident Escalation Notice.' }
+            ]
+        },
+        {
+            label: "Administrative", icon: "👔", items: [
+                { id: 'adm_all', icon: '📢', label: 'Team Update', prompt: 'a Team Update or Announcement.' },
+                { id: 'adm_ooo', icon: '🌴', label: 'Out of Office', prompt: 'an Out of Office coverage email.' }
+            ]
+        }
     ];
 
     const MEETING_TEMPLATES = [
-        { id: 'req', icon: '📋', label: 'Req Gathering (BA)', type: 'Business Requirements Gathering session' },
-        { id: 'arch', icon: '📐', label: 'Arch Review', type: 'Technical Architecture Review' },
-        { id: 'sprint', icon: '🏃', label: 'Sprint Planning', type: 'Sprint Planning and Backlog Grooming' },
-        { id: 'code', icon: '💻', label: 'Code Review Sync', type: 'Peer Code Review Sync' },
-        { id: 'kickoff', icon: '🚀', label: 'Project Kickoff (PM)', type: 'Project Kickoff Meeting' },
-        { id: 'rca', icon: '🔍', label: 'Incident RCA', type: 'Major Incident Post-Mortem (RCA)' },
-        { id: 'gono', icon: '🚦', label: 'Go/No-Go Decision', type: 'Release Go/No-Go Decision Meeting' },
-        { id: 'oneonone', icon: '🤝', label: '1:1 Sync', type: '1:1 Supervisor / Direct Report Sync' }
+        {
+            label: "Project Management", icon: "📊", items: [
+                { id: 'm_pm_kick', icon: '🚀', label: 'Project Kickoff', type: 'Project Kickoff Meeting' },
+                { id: 'm_pm_stat', icon: '📈', label: 'Status Check-in', type: 'Weekly Status Check-in' },
+                { id: 'm_pm_risk', icon: '⚠️', label: 'Risk Review', type: 'Risk and Issue Review' },
+                { id: 'm_pm_steer', icon: '🧭', label: 'Steering Comm.', type: 'Steering Committee Sync' }
+            ]
+        },
+        {
+            label: "Collaboration", icon: "🤝", items: [
+                { id: 'm_col_brain', icon: '🧠', label: 'Brainstorming', type: 'Team Brainstorming Session' },
+                { id: 'm_col_work', icon: '🛠️', label: 'Working Session', type: 'Active Working Session' },
+                { id: 'm_col_sync', icon: '🔗', label: 'Cross-team Sync', type: 'Cross-functional Team Sync' }
+            ]
+        },
+        {
+            label: "Analysis & Design", icon: "📋", items: [
+                { id: 'm_ad_req', icon: '📝', label: 'Req Gathering', type: 'Business Requirements Gathering' },
+                { id: 'm_ad_arch', icon: '📐', label: 'Arch Review', type: 'Technical Architecture Review' },
+                { id: 'm_ad_ux', icon: '🎨', label: 'UX/UI Review', type: 'UX/UI Design Review' }
+            ]
+        },
+        {
+            label: "Development", icon: "💻", items: [
+                { id: 'm_dev_sprint', icon: '🏃', label: 'Sprint Planning', type: 'Sprint Planning' },
+                { id: 'm_dev_stand', icon: '⏱️', label: 'Daily Standup', type: 'Daily Standup' },
+                { id: 'm_dev_groom', icon: '🪒', label: 'Backlog Grooming', type: 'Backlog Grooming' },
+                { id: 'm_dev_code', icon: '👀', label: 'Code Review Sync', type: 'Peer Code Review Sync' }
+            ]
+        },
+        {
+            label: "Quality Assurance", icon: "✅", items: [
+                { id: 'm_qa_plan', icon: '📄', label: 'Test Plan Review', type: 'Test Plan Review' },
+                { id: 'm_qa_bug', icon: '🐞', label: 'Bug Triage', type: 'Defect / Bug Triage' },
+                { id: 'm_qa_uat', icon: '👥', label: 'UAT Kickoff', type: 'User Acceptance Testing Kickoff' }
+            ]
+        },
+        {
+            label: "Security", icon: "🔒", items: [
+                { id: 'm_sec_threat', icon: '🛡️', label: 'Threat Modeling', type: 'Threat Modeling Session' },
+                { id: 'm_sec_audit', icon: '📋', label: 'Audit Sync', type: 'Security Audit Preparation Sync' }
+            ]
+        },
+        {
+            label: "Release Mgmt", icon: "🚀", items: [
+                { id: 'm_rm_gono', icon: '🚦', label: 'Go/No-Go Decision', type: 'Release Go/No-Go Decision' },
+                { id: 'm_rm_plan', icon: '📦', label: 'Deployment Plan', type: 'Deployment Planning' },
+                { id: 'm_rm_rca', icon: '🔍', label: 'Incident RCA', type: 'Major Incident Post-Mortem (RCA)' }
+            ]
+        },
+        {
+            label: "Administrative", icon: "👔", items: [
+                { id: 'm_adm_1on1', icon: '🗣️', label: '1:1 Sync', type: '1:1 Supervisor Sync' },
+                { id: 'm_adm_all', icon: '🌍', label: 'Team All-Hands', type: 'Team All-Hands / Townhall' },
+                { id: 'm_adm_perf', icon: '📈', label: 'Perf. Review', type: 'Performance Review' }
+            ]
+        }
     ];
 
-    let sdk; 
+    const PEOPLE_TEMPLATES = [
+        { id: 'ppl_intro', icon: '👋', label: 'Draft Intro', prompt: 'a professional introduction message to connect with a colleague.' },
+        { id: 'ppl_meet', icon: '📅', label: 'Req Meeting', prompt: 'a polite request for a 15-minute introductory chat or sync.' },
+        { id: 'ppl_kudo', icon: '🎉', label: 'Send Kudos', prompt: 'a congratulatory message or kudos to a team member for their recent work.' }
+    ];
+
+    const TODO_TEMPLATES = [
+        { id: 'td_break', icon: '🔪', label: 'Task Breakdown', prompt: 'help me break down a large project task into smaller, actionable sub-tasks.' },
+        { id: 'td_stat', icon: '📝', label: 'Draft Update', prompt: 'draft a status update summarizing my recent progress on a task.' },
+        { id: 'td_block', icon: '🛑', label: 'Escalate Blocker', prompt: 'draft an escalation email regarding a blocker preventing me from completing a task.' }
+    ];
+
+    const ONEDRIVE_TEMPLATES = [
+        { id: 'od_sum', icon: '📄', label: 'Doc Summary', prompt: 'create a brief, bulleted executive summary of a document. I will paste the text next.' },
+        { id: 'od_share', icon: '🔗', label: 'Share Context', prompt: 'draft an email providing context and sharing a link to a newly created document.' },
+        { id: 'od_review', icon: '👀', label: 'Req Review', prompt: 'draft a polite request asking a colleague to review a document and provide feedback.' }
+    ];
+
+    let sdk;
 
     function initHostApp() {
         sdk = new AIProBridge({
             storageSetter: (k, v) => GM_setValue(k, v),
             storageGetter: (k) => GM_getValue(k),
-            onStateChange: (isOpen) => {
-                const offset = isOpen ? 450 + 20 : 20;
-                Object.values(BTNS).forEach(id => {
-                    const btn = document.getElementById(id);
-                    if (btn) {
-                        btn.style.right = `${offset}px`;
-                        isOpen ? btn.classList.add('app-collapsed') : btn.classList.remove('app-collapsed');
-                    }
-                });
-                document.querySelectorAll('.app-dropdown-menu').forEach(m => m.style.display = 'none');
-                document.querySelectorAll('.app-fab-base').forEach(b => b.classList.remove('app-menu-open'));
+            onStateChange: (isOpen, panelWidth) => {
+                closeAllMenus();
             }
         });
 
@@ -281,72 +425,118 @@
             const style = document.createElement('style');
             style.id = 'app-host-styles';
             style.innerHTML = `
-                .app-fab-base { position: fixed; right: 20px; height: 40px; border-radius: 20px; box-shadow: 0 4px 8px rgba(0,0,0,0.2); z-index: 9999998; display: flex; align-items: center; white-space: nowrap; font-family: 'Segoe UI', Tahoma, sans-serif; transform-origin: right center; transition: right 0.3s cubic-bezier(0.4,0,0.2,1), width 0.3s cubic-bezier(0.4,0,0.2,1), bottom 0.3s cubic-bezier(0.4,0,0.2,1), transform 0.3s cubic-bezier(0.34, 1.56, 0.64, 1), opacity 0.3s ease; }
-                .app-fab-base.app-menu-open { z-index: 10000001; }
+                .app-fab-base { position: fixed; right: 20px; height: 40px; border-radius: 20px; box-shadow: 0 4px 8px rgba(0,0,0,0.2); z-index: 2147483645; display: flex; align-items: center; white-space: nowrap; font-family: 'Segoe UI', Tahoma, sans-serif; transform-origin: right center; transition: right 0.1s linear, width 0.3s cubic-bezier(0.4,0,0.2,1), bottom 0.3s cubic-bezier(0.4,0,0.2,1), transform 0.3s cubic-bezier(0.34, 1.56, 0.64, 1), opacity 0.3s ease; }
+                .app-fab-base.app-menu-open { z-index: 2147483646; }
                 .app-fab-hidden { transform: scale(0) !important; opacity: 0 !important; pointer-events: none !important; }
                 .app-fab-text, .app-fab-divider, .app-fab-arrow { transition: opacity 0.2s, display 0.2s; }
-                .app-btn-toggle { width: 140px; background: #005ea2; color: white; border: none; cursor: pointer; justify-content: center; font-weight: bold; font-size: 13px; z-index: 9999999; }
+                .app-btn-toggle { width: 140px; background: #005ea2; color: white; border: none; cursor: pointer; justify-content: center; font-weight: bold; font-size: 13px; z-index: 2147483647; }
                 .app-btn-reply { width: 155px; background: #107c41; }
                 .app-btn-compose { width: 145px; background: #0078d4; }
                 .app-btn-meeting { width: 165px; background: #d83b01; }
+                .app-btn-people { width: 145px; background: #008272; }
+                .app-btn-todo { width: 145px; background: #0078d4; }
+                .app-btn-onedrive { width: 165px; background: #0364b8; }
                 .app-split-main { background: none; border: none; color: white; cursor: pointer; flex-grow: 1; height: 100%; display: flex; align-items: center; justify-content: flex-start; padding: 0 0 0 15px; font-weight: bold; font-size: 13px; border-radius: 20px 0 0 20px; }
                 .app-split-main:hover { background: rgba(255,255,255,0.1); }
                 .app-fab-divider { width: 1px; height: 20px; background: rgba(255,255,255,0.4); }
                 .app-fab-arrow { background: none; border: none; color: white; cursor: pointer; width: 35px; height: 100%; display: flex; align-items: center; justify-content: center; border-radius: 0 20px 20px 0; }
                 .app-fab-arrow:hover { background: rgba(0,0,0,0.1); }
-                .app-collapsed:not(:hover) { width: 40px !important; border-radius: 50% !important; }
-                .app-collapsed:not(:hover) .app-fab-text, .app-collapsed:not(:hover) .app-fab-divider, .app-collapsed:not(:hover) .app-fab-arrow { display: none !important; }
-                .app-collapsed:not(:hover) .app-split-main { padding: 0; justify-content: center; border-radius: 50%; }
-                .app-dropdown-menu { position: absolute; bottom: 45px; right: 0; background: white; border: 1px solid #e1dfdd; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.25); display: none; flex-direction: column; overflow: hidden; width: 220px; z-index: 10000000; }
-                .app-tone-btn { padding: 12px 16px; border: none; background: none; text-align: left; cursor: pointer; color: #323130; font-size: 13px; font-weight: 600; border-bottom: 1px solid #f3f2f1; transition: background 0.2s; display: flex; align-items: center; gap: 10px; }
+
+                /* Keep un-squished ONLY if menu is open or being hovered */
+                .app-collapsed:not(:hover):not(.app-menu-open) { width: 40px !important; border-radius: 50% !important; }
+                .app-collapsed:not(:hover):not(.app-menu-open) .app-fab-text,
+                .app-collapsed:not(:hover):not(.app-menu-open) .app-fab-divider,
+                .app-collapsed:not(:hover):not(.app-menu-open) .app-fab-arrow { display: none !important; }
+                .app-collapsed:not(:hover):not(.app-menu-open) .app-split-main { padding: 0; justify-content: center; border-radius: 50%; }
+
+                /* Cascading Menu System */
+                .app-dropdown-menu { position: absolute; bottom: 45px; right: 0; background: white; border: 1px solid #e1dfdd; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.25); display: none; overflow: hidden; width: 230px; }
+                .app-menu-layer { display: flex; flex-direction: column; width: 100%; }
+                .app-tone-btn { padding: 12px 16px; border: none; background: none; text-align: left; cursor: pointer; color: #323130; font-size: 13px; font-weight: 600; border-bottom: 1px solid #f3f2f1; transition: background 0.2s; display: flex; align-items: center; justify-content: space-between; }
                 .app-tone-btn:last-child { border-bottom: none; }
                 .app-tone-btn:hover { background: #f3f2f1; }
+                .app-back-btn { padding: 10px 16px; border: none; background: #f3f2f1; text-align: left; cursor: pointer; color: #005ea2; font-size: 12px; font-weight: bold; border-bottom: 2px solid #e1dfdd; }
+                .app-back-btn:hover { background: #e1dfdd; }
             `;
             document.head.appendChild(style);
 
             document.addEventListener('click', (e) => {
-                if (!e.target.closest('.app-fab-base')) {
-                    document.querySelectorAll('.app-dropdown-menu').forEach(m => m.style.display = 'none');
-                    document.querySelectorAll('.app-fab-base').forEach(b => b.classList.remove('app-menu-open'));
-                }
+                if (!e.target.closest('.app-fab-base')) closeAllMenus();
             });
         }
     }
 
-    function buildSplitButton(id, cssClass, icon, label, mainAction, menuItems, menuAction) {
+    function closeAllMenus() {
+        document.querySelectorAll('.app-dropdown-menu').forEach(m => m.style.display = 'none');
+        document.querySelectorAll('.app-fab-base').forEach(b => b.classList.remove('app-menu-open'));
+        document.querySelectorAll('.app-menu-main').forEach(l => l.style.display = 'flex');
+        document.querySelectorAll('.app-menu-sub').forEach(l => l.style.display = 'none');
+    }
+
+    function buildCascadingSplitButton(id, cssClass, icon, label, mainAction, structure, menuAction) {
         if (document.getElementById(id)) return;
         const cont = document.createElement('div');
         cont.id = id;
-        cont.className = `app-fab-base ${cssClass} app-fab-hidden ${sdk && sdk.isOpen ? 'app-collapsed' : ''}`;
-        
-        let menuHTML = menuItems.map(item => `<button class="app-tone-btn" data-id="${item.id}">${item.icon} ${item.label}</button>`).join('');
-        
+        cont.className = `app-fab-base ${cssClass} app-fab-hidden`;
+
+        let mainLayerHTML = `<div class="app-menu-layer app-menu-main">`;
+        let subLayersHTML = ``;
+
+        structure.forEach((item, index) => {
+            if (item.items) {
+                const subId = `${id}-sub-${index}`;
+                mainLayerHTML += `<button class="app-tone-btn app-cat-trigger" data-target="${subId}"><span>${item.icon} ${item.label}</span> <span>▶</span></button>`;
+
+                subLayersHTML += `<div class="app-menu-layer app-menu-sub" id="${subId}" style="display:none;">`;
+                subLayersHTML += `<button class="app-back-btn">⬅ Back to Categories</button>`;
+                item.items.forEach(sub => {
+                    subLayersHTML += `<button class="app-tone-btn" data-id="${sub.id}"><span>${sub.icon} ${sub.label}</span></button>`;
+                });
+                subLayersHTML += `</div>`;
+            } else {
+                mainLayerHTML += `<button class="app-tone-btn" data-id="${item.id}"><span>${item.icon} ${item.label}</span></button>`;
+            }
+        });
+        mainLayerHTML += `</div>`;
+
         cont.innerHTML = `
             <button class="app-split-main"><span style="font-size: 15px;">${icon}</span><span class="app-fab-text" style="margin-left: 8px;">${label}</span></button>
             <div class="app-fab-divider"></div>
             <button class="app-fab-arrow">⏷</button>
-            <div class="app-dropdown-menu">${menuHTML}</div>
+            <div class="app-dropdown-menu">${mainLayerHTML}${subLayersHTML}</div>
         `;
         document.body.appendChild(cont);
 
         cont.querySelector('.app-split-main').onclick = (e) => { e.preventDefault(); mainAction(e); };
-        
+
         cont.querySelector('.app-fab-arrow').onclick = (e) => {
-            e.preventDefault(); e.stopPropagation(); 
+            e.preventDefault(); e.stopPropagation();
             const menu = cont.querySelector('.app-dropdown-menu');
             const isOpening = menu.style.display !== 'flex';
-            
-            document.querySelectorAll('.app-dropdown-menu').forEach(m => m.style.display = 'none');
-            document.querySelectorAll('.app-fab-base').forEach(b => b.classList.remove('app-menu-open'));
-            
+            closeAllMenus();
             if (isOpening) { menu.style.display = 'flex'; cont.classList.add('app-menu-open'); }
         };
 
-        cont.querySelectorAll('.app-tone-btn').forEach(btn => {
+        cont.querySelectorAll('.app-cat-trigger').forEach(btn => {
             btn.onclick = (e) => {
                 e.preventDefault(); e.stopPropagation();
-                cont.querySelector('.app-dropdown-menu').style.display = 'none';
-                cont.classList.remove('app-menu-open');
+                cont.querySelector('.app-menu-main').style.display = 'none';
+                cont.querySelector(`#${btn.dataset.target}`).style.display = 'flex';
+            };
+        });
+
+        cont.querySelectorAll('.app-back-btn').forEach(btn => {
+            btn.onclick = (e) => {
+                e.preventDefault(); e.stopPropagation();
+                cont.querySelectorAll('.app-menu-sub').forEach(m => m.style.display = 'none');
+                cont.querySelector('.app-menu-main').style.display = 'flex';
+            };
+        });
+
+        cont.querySelectorAll('.app-tone-btn[data-id]').forEach(btn => {
+            btn.onclick = (e) => {
+                e.preventDefault(); e.stopPropagation();
+                closeAllMenus();
                 menuAction(btn.dataset.id, e);
             };
         });
@@ -355,12 +545,21 @@
     function maintainOutlookUI() {
         if (!sdk) initHostApp();
 
-        const isCalendar = window.location.pathname.includes('/calendar');
-        const isMail = !isCalendar;
-        
-        // Check if an email is actively selected/open in the reading pane
-        const hasEmail = !!(document.querySelector('#Item\\.MessageUniqueBody') || document.querySelector('[aria-label="Reading Pane"]'));
+        // Safe Context Parsing
+        const path = window.location.href.toLowerCase();
+        const isCalendar = path.includes('/calendar');
+        const isPeople = path.includes('/people');
+        const isTodo = path.includes('/todo') || path.includes('/tasks');
+        const isOneDrive = path.includes('/onedrive') || path.includes('.sharepoint.com') || path.includes('/files');
+        const isMail = !isCalendar && !isPeople && !isTodo && !isOneDrive;
 
+        // Visibility Check for Email Pane
+        const readingPane = document.querySelector('[aria-label="Reading Pane"]');
+        const altPane = document.querySelector('#Item\\.MessageUniqueBody');
+        const hasEmail = (readingPane && readingPane.offsetParent !== null) || (altPane && altPane.offsetParent !== null);
+
+        // Dynamically shift buttons based on current slider state
+        const currentOffset = sdk.isOpen ? sdk.panelWidth + 20 : 20;
         let currentBottom = 20;
 
         // 1. Toggle Button
@@ -368,72 +567,108 @@
         if (!bToggle) {
             bToggle = document.createElement('button');
             bToggle.id = BTNS.TOGGLE;
-            bToggle.className = `app-fab-base app-btn-toggle ${sdk.isOpen ? 'app-collapsed' : ''}`;
+            bToggle.className = `app-fab-base app-btn-toggle`;
             bToggle.innerHTML = `<span style="color: #facc15; font-size: 16px; text-shadow: 0 0 5px rgba(250, 204, 21, 0.5);">✨</span><span class="app-fab-text" style="margin-left: 8px;">ITS AI Pro</span>`;
-            bToggle.onclick = (e) => { 
-                e.preventDefault(); 
-                sdk.storeData('ai_pro_pending_prompt', ''); 
-                const win = (!sdk.isOpen && sdk.needsAuth()) ? sdk.getAuthWindow() : null;
-                sdk.toggle(win); 
-            };
+            bToggle.onclick = (e) => { e.preventDefault(); sdk.storeData('ai_pro_pending_prompt', ''); sdk.toggle( (!sdk.isOpen && sdk.needsAuth()) ? sdk.getAuthWindow() : null ); };
             document.body.appendChild(bToggle);
         }
+        bToggle.style.right = `${currentOffset}px`;
         bToggle.style.bottom = `${currentBottom}px`;
+        sdk.isOpen ? bToggle.classList.add('app-collapsed') : bToggle.classList.remove('app-collapsed');
         currentBottom += 50;
 
-        // 2. Auto-Reply Button (Requires Mail AND an active email)
-        buildSplitButton(BTNS.REPLY, 'app-btn-reply', '📝', 'Auto-Reply', 
-            () => { let r = getCleanEmailBody(); if(!r) return alert("⚠️ Select email text first."); const win = sdk.needsAuth() ? sdk.getAuthWindow() : null; sdk.sendPrompt("Please draft a professional reply to:\n\n" + sanitizeText(r), win); },
+        // 2. Mail: Auto-Reply
+        buildCascadingSplitButton(BTNS.REPLY, 'app-btn-reply', '📝', 'Auto-Reply',
+            () => { let r = getCleanEmailBody(); if(!r) return alert("⚠️ Select email text first."); sdk.sendPrompt("Please draft a professional reply to:\n\n" + sanitizeText(r), sdk.needsAuth() ? sdk.getAuthWindow() : null); },
             [{id:'executive', icon:'📊', label:'Executive'}, {id:'friendly', icon:'👋', label:'Friendly'}, {id:'concise', icon:'✂️', label:'Concise'}],
-            (id) => { let r = getCleanEmailBody(); if(!r) return alert("⚠️ Select email text first."); const win = sdk.needsAuth() ? sdk.getAuthWindow() : null; sdk.sendPrompt(`Please draft a ${id} reply to:\n\n${sanitizeText(r)}`, win); }
+            (id) => { let r = getCleanEmailBody(); if(!r) return alert("⚠️ Select email text first."); sdk.sendPrompt(`Please draft a ${id} reply to:\n\n${sanitizeText(r)}`, sdk.needsAuth() ? sdk.getAuthWindow() : null); }
         );
         const bReply = document.getElementById(BTNS.REPLY);
         if (bReply) {
-            if (isMail && hasEmail) {
-                bReply.classList.remove('app-fab-hidden');
-                bReply.style.bottom = `${currentBottom}px`;
-                currentBottom += 50;
-            } else {
-                bReply.classList.add('app-fab-hidden');
-            }
+            bReply.style.right = `${currentOffset}px`;
+            sdk.isOpen ? bReply.classList.add('app-collapsed') : bReply.classList.remove('app-collapsed');
+            if (isMail && hasEmail) { bReply.classList.remove('app-fab-hidden'); bReply.style.bottom = `${currentBottom}px`; currentBottom += 50; }
+            else { bReply.classList.add('app-fab-hidden'); }
         }
 
-        // 3. Compose Button (Requires Mail)
-        buildSplitButton(BTNS.COMPOSE, 'app-btn-compose', '✏️', 'Compose',
-            () => { const win = sdk.needsAuth() ? sdk.getAuthWindow() : null; sdk.sendPrompt("Please help me draft a professional email for a NYS ITS environment. Ask me for the specifics.", win); },
+        // 3. Mail: Compose
+        buildCascadingSplitButton(BTNS.COMPOSE, 'app-btn-compose', '✏️', 'Compose',
+            () => { sdk.sendPrompt("Please help me draft a professional email for a NYS ITS environment. Ask me for the specifics.", sdk.needsAuth() ? sdk.getAuthWindow() : null); },
             COMPOSE_TEMPLATES,
-            (id) => { const tmpl = COMPOSE_TEMPLATES.find(t => t.id === id); const win = sdk.needsAuth() ? sdk.getAuthWindow() : null; sdk.sendPrompt(`Please help me draft an email for a NYS ITS environment regarding: ${tmpl.prompt}\n\nPlease prompt me for the specific details.`, win); }
+            (id) => {
+                let tPrompt = ''; COMPOSE_TEMPLATES.forEach(c => c.items.forEach(i => { if(i.id === id) tPrompt = i.prompt; }));
+                sdk.sendPrompt(`Please help me draft an email for a NYS ITS environment regarding: ${tPrompt}\n\nPlease prompt me for details.`, sdk.needsAuth() ? sdk.getAuthWindow() : null);
+            }
         );
         const bComp = document.getElementById(BTNS.COMPOSE);
         if (bComp) {
-            if (isMail) {
-                bComp.classList.remove('app-fab-hidden');
-                bComp.style.bottom = `${currentBottom}px`;
-                currentBottom += 50;
-            } else {
-                bComp.classList.add('app-fab-hidden');
-            }
+            bComp.style.right = `${currentOffset}px`;
+            sdk.isOpen ? bComp.classList.add('app-collapsed') : bComp.classList.remove('app-collapsed');
+            if (isMail) { bComp.classList.remove('app-fab-hidden'); bComp.style.bottom = `${currentBottom}px`; currentBottom += 50; }
+            else { bComp.classList.add('app-fab-hidden'); }
         }
 
-        // 4. Meeting Button (Requires Calendar)
-        buildSplitButton(BTNS.MEETING, 'app-btn-meeting', '📅', 'New Meeting',
-            () => { const win = sdk.needsAuth() ? sdk.getAuthWindow() : null; sdk.sendPrompt("Please help me draft a meeting invitation. Ask me for the topic and attendees.", win); },
+        // 4. Calendar: Meetings
+        buildCascadingSplitButton(BTNS.MEETING, 'app-btn-meeting', '📅', 'New Meeting',
+            () => { sdk.sendPrompt("Please help me draft a meeting invitation. Ask me for the topic and attendees.", sdk.needsAuth() ? sdk.getAuthWindow() : null); },
             MEETING_TEMPLATES,
-            (id) => { const tmpl = MEETING_TEMPLATES.find(t => t.id === id); const win = sdk.needsAuth() ? sdk.getAuthWindow() : null; sdk.sendPrompt(`Please help me draft a meeting invitation for a ${tmpl.type}.\n\nPlease use the exact following structure:\n\n**Purpose:** [Draft purpose here based on meeting type]\n\n**Agenda:**\n* Intro / Background\n* Action Items\n* Next Steps\n\nPlease provide the draft and prompt me for any missing specific details.`, win); }
+            (id) => {
+                let tType = ''; MEETING_TEMPLATES.forEach(c => c.items.forEach(i => { if(i.id === id) tType = i.type; }));
+                sdk.sendPrompt(`Please help me draft a meeting invitation for a ${tType}.\n\nUse this structure:\n**Purpose:** [Draft purpose]\n\n**Agenda:**\n* Intro\n* Action Items\n* Next Steps\n\nPrompt me for specifics.`, sdk.needsAuth() ? sdk.getAuthWindow() : null);
+            }
         );
         const bMeet = document.getElementById(BTNS.MEETING);
         if (bMeet) {
-            if (isCalendar) {
-                bMeet.classList.remove('app-fab-hidden');
-                bMeet.style.bottom = `${currentBottom}px`;
-                currentBottom += 50; // Keeps dynamic sizing ready for future buttons
-            } else {
-                bMeet.classList.add('app-fab-hidden');
-            }
+            bMeet.style.right = `${currentOffset}px`;
+            sdk.isOpen ? bMeet.classList.add('app-collapsed') : bMeet.classList.remove('app-collapsed');
+            if (isCalendar) { bMeet.classList.remove('app-fab-hidden'); bMeet.style.bottom = `${currentBottom}px`; currentBottom += 50; }
+            else { bMeet.classList.add('app-fab-hidden'); }
+        }
+
+        // 5. People App
+        buildCascadingSplitButton(BTNS.PEOPLE, 'app-btn-people', '👥', 'Connect',
+            () => { sdk.sendPrompt("Please help me draft a professional message to a colleague.", sdk.needsAuth() ? sdk.getAuthWindow() : null); },
+            PEOPLE_TEMPLATES,
+            (id) => { const t = PEOPLE_TEMPLATES.find(x => x.id === id); sdk.sendPrompt(`Please help me draft ${t.prompt}`, sdk.needsAuth() ? sdk.getAuthWindow() : null); }
+        );
+        const bPpl = document.getElementById(BTNS.PEOPLE);
+        if (bPpl) {
+            bPpl.style.right = `${currentOffset}px`;
+            sdk.isOpen ? bPpl.classList.add('app-collapsed') : bPpl.classList.remove('app-collapsed');
+            if (isPeople) { bPpl.classList.remove('app-fab-hidden'); bPpl.style.bottom = `${currentBottom}px`; currentBottom += 50; }
+            else { bPpl.classList.add('app-fab-hidden'); }
+        }
+
+        // 6. To Do App
+        buildCascadingSplitButton(BTNS.TODO, 'app-btn-todo', '✅', 'Task Action',
+            () => { sdk.sendPrompt("I need help organizing or updating a task.", sdk.needsAuth() ? sdk.getAuthWindow() : null); },
+            TODO_TEMPLATES,
+            (id) => { const t = TODO_TEMPLATES.find(x => x.id === id); sdk.sendPrompt(`Please ${t.prompt}`, sdk.needsAuth() ? sdk.getAuthWindow() : null); }
+        );
+        const bTodo = document.getElementById(BTNS.TODO);
+        if (bTodo) {
+            bTodo.style.right = `${currentOffset}px`;
+            sdk.isOpen ? bTodo.classList.add('app-collapsed') : bTodo.classList.remove('app-collapsed');
+            if (isTodo) { bTodo.classList.remove('app-fab-hidden'); bTodo.style.bottom = `${currentBottom}px`; currentBottom += 50; }
+            else { bTodo.classList.add('app-fab-hidden'); }
+        }
+
+        // 7. OneDrive / SharePoint
+        buildCascadingSplitButton(BTNS.ONEDRIVE, 'app-btn-onedrive', '☁️', 'Doc Action',
+            () => { sdk.sendPrompt("I need help summarizing or sharing a document.", sdk.needsAuth() ? sdk.getAuthWindow() : null); },
+            ONEDRIVE_TEMPLATES,
+            (id) => { const t = ONEDRIVE_TEMPLATES.find(x => x.id === id); sdk.sendPrompt(`Please ${t.prompt}`, sdk.needsAuth() ? sdk.getAuthWindow() : null); }
+        );
+        const bDrive = document.getElementById(BTNS.ONEDRIVE);
+        if (bDrive) {
+            bDrive.style.right = `${currentOffset}px`;
+            sdk.isOpen ? bDrive.classList.add('app-collapsed') : bDrive.classList.remove('app-collapsed');
+            if (isOneDrive) { bDrive.classList.remove('app-fab-hidden'); bDrive.style.bottom = `${currentBottom}px`; currentBottom += 50; }
+            else { bDrive.classList.add('app-fab-hidden'); }
         }
     }
 
-    if (window.location.hostname.includes('outlook')) {
+    if (window.location.hostname.includes('outlook') || window.location.hostname.includes('sharepoint')) {
         setInterval(maintainOutlookUI, 2000);
     }
 })();
