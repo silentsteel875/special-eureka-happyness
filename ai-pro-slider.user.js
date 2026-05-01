@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         AI Pro - The Puppet Master (v11.0.0 Master Agent)
+// @name         AI Pro - The Puppet Master (v12.1.0 Sync Patch)
 // @namespace    https://pro.ai.ny.gov/
-// @version      11.0.0
-// @description  Full Autonomous Agent: Auto-renames threads, searches history, and dynamically engineers prompts.
+// @version      12.1.0
+// @description  Adds Two-Way Mirror token syncing and Interactive Login buttons.
 // @match        https://outlook.office.com/*
 // @match        https://outlook.office365.com/*
 // @match        https://outlook.cloud.microsoft/*
@@ -24,35 +24,64 @@
     // PART 0: THE DOMAIN AGENTS (Runs inside pro.ai.ny.gov to handle MSAL tokens)
     // ==========================================================================
     if (window.location.hostname === 'pro.ai.ny.gov') {
+        
+        // TWO-WAY MIRROR: Continuously sync tokens from this domain back to the TM Vault
+        // This ensures the background agent gets tokens whether user logs in via popup OR iframe
+        setInterval(() => {
+            const hasTokens = Object.keys(sessionStorage).some(k => k.toLowerCase().includes('accesstoken')) || Object.keys(localStorage).some(k => k.toLowerCase().includes('accesstoken'));
+            if (hasTokens) {
+                const cache = { session: {}, local: {} };
+                for (let i = 0; i < sessionStorage.length; i++) {
+                    const key = sessionStorage.key(i);
+                    const val = sessionStorage.getItem(key);
+                    if (typeof val === 'string' && val !== '[object Object]') cache.session[key] = val;
+                }
+                for (let i = 0; i < localStorage.length; i++) {
+                    const key = localStorage.key(i);
+                    const val = localStorage.getItem(key);
+                    if (typeof val === 'string' && val !== '[object Object]') cache.local[key] = val;
+                }
+                
+                const existingVault = GM_getValue('ai_pro_msal_vault');
+                const newVault = JSON.stringify(cache);
+                if (existingVault !== newVault) {
+                    console.log("🔄 [Two-Way Mirror] Syncing fresh tokens to Vault.");
+                    GM_setValue('ai_pro_msal_vault', newVault);
+                }
+            }
+        }, 1500);
+
+        // If running in the Popup Window, close automatically once synced
         if (window.opener && window.top === window.self) {
-            console.log("👻 [Popup] Searching for MSAL tokens...");
-            const scrapeInterval = setInterval(() => {
-                const hasTokens = Object.keys(sessionStorage).some(k => k.toLowerCase().includes('accesstoken')) || Object.keys(localStorage).some(k => k.toLowerCase().includes('accesstoken'));
-                if (hasTokens) {
-                    clearInterval(scrapeInterval);
-                    const cache = { session: {}, local: {} };
-                    for (let i = 0; i < sessionStorage.length; i++) cache.session[sessionStorage.key(i)] = sessionStorage.getItem(sessionStorage.key(i));
-                    for (let i = 0; i < localStorage.length; i++) cache.local[localStorage.key(i)] = localStorage.getItem(localStorage.key(i));
-                    GM_setValue('ai_pro_msal_vault', JSON.stringify(cache));
+            console.log("👻 [Popup] Waiting for authentication...");
+            const closeCheck = setInterval(() => {
+                const vault = GM_getValue('ai_pro_msal_vault');
+                if (vault && vault.length > 50) {
+                    clearInterval(closeCheck);
                     setTimeout(() => window.close(), 1000); 
                 }
             }, 500);
         }
 
+        // If running in the Iframe, inject initial tokens from Vault if local storage is empty
         if (window.top !== window.self) {
             let injectAttempts = 0;
             const injectInterval = setInterval(() => {
+                const hasTokensLocally = Object.keys(sessionStorage).some(k => k.toLowerCase().includes('accesstoken'));
+                if (hasTokensLocally) { clearInterval(injectInterval); return; } // Don't overwrite if iframe is already authenticated
+
                 const vault = GM_getValue('ai_pro_msal_vault');
                 if (vault) {
                     clearInterval(injectInterval);
                     try {
                         const c = JSON.parse(vault);
-                        Object.keys(c.session).forEach(k => sessionStorage.setItem(k, c.session[k]));
-                        Object.keys(c.local).forEach(k => localStorage.setItem(k, c.local[k]));
+                        Object.keys(c.session).forEach(k => { if(typeof c.session[k] === 'string') sessionStorage.setItem(k, c.session[k]); });
+                        Object.keys(c.local).forEach(k => { if(typeof c.local[k] === 'string') localStorage.setItem(k, c.local[k]); });
                     } catch(e) {}
                 } else if (++injectAttempts > 20) clearInterval(injectInterval);
             }, 500);
 
+            // Type the pending prompt
             window.addEventListener('load', () => {
                 const prompt = GM_getValue('ai_pro_pending_prompt');
                 if (!prompt) return; 
@@ -155,14 +184,29 @@
             return null;
         }
 
-        // --- THE AUTONOMOUS AGENT ORCHESTRATOR ---
-        executeHeadlessPrompt(emailText, callback) {
+        deleteChat(conversationId) {
             const token = this.extractBearerToken();
-            if (!token) return callback({ error: "No Auth Token" });
+            if (!token || !conversationId) return;
+
+            console.log(`👻 [GhostAgent] Erasing thread: ${conversationId}`);
+            GM_xmlhttpRequest({
+                method: "DELETE",
+                url: this.historyUrl + conversationId,
+                headers: { "Authorization": `Bearer ${token}` },
+                onload: () => console.log("👻 [GhostAgent] Thread vaporized."),
+                onerror: () => console.warn("👻 [GhostAgent] Failed to delete thread.")
+            });
+        }
+
+        executeHeadlessPrompt(emailText, callback, attachedFile = null) {
+            const token = this.extractBearerToken();
+            if (!token) {
+                console.error("🔍 [SmartAgent] Aborting API Call: No Auth Token");
+                return callback({ error: "No Auth Token" });
+            }
 
             let hasRetried = false;
 
-            // Step 4: Fire the AI Generation payload
             const doGenerate = (convId) => {
                 console.log(`🔍 [SmartAgent] Firing payload into Thread ID: ${convId}`);
                 
@@ -171,6 +215,8 @@
                 const payload = JSON.stringify({ userMessage: sysPrompt, chatModel: "gemini-2.5-flash-lite", conversationId: convId });
                 const formData = new FormData();
                 formData.append("message", new Blob([payload], { type: "application/json" }), "blob");
+                
+                if (attachedFile) formData.append("attachments", attachedFile, attachedFile.name || "attachment.pdf");
 
                 GM_xmlhttpRequest({
                     method: "POST",
@@ -179,7 +225,6 @@
                     data: formData,
                     timeout: 20000,
                     onload: (response) => {
-                        // If 404 (thread was deleted server-side), clear cache and search/re-initiate
                         if (response.status === 404 || response.responseText.includes("NOT_FOUND")) {
                             if (!hasRetried) {
                                 console.warn("🔍 [SmartAgent] Thread deleted. Requesting a new one...");
@@ -211,30 +256,24 @@
                 });
             };
 
-            // Step 3: Rename a brand new chat thread
             const doRename = (newId) => {
-                console.log(`🔍 [SmartAgent] Renaming new thread ${newId} to 'AIPro Smart Suggestions'...`);
                 GM_xmlhttpRequest({
                     method: "PUT",
                     url: this.historyUrl + newId,
                     headers: { "Authorization": `Bearer ${token}`, "Content-Type": "application/json" },
                     data: JSON.stringify({ label: "AIPro Smart Suggestions" }),
                     onload: () => {
-                        console.log("🔍 [SmartAgent] Thread successfully renamed.");
                         GM_setValue('ai_pro_smart_agent_id', newId);
                         doGenerate(newId);
                     },
                     onerror: () => {
-                        console.warn("🔍 [SmartAgent] Rename failed, but proceeding anyway.");
                         GM_setValue('ai_pro_smart_agent_id', newId);
                         doGenerate(newId);
                     }
                 });
             };
 
-            // Step 2: Request a brand new ID
             const doInitiate = () => {
-                console.log("🔍 [SmartAgent] Initiating brand new chat session...");
                 GM_xmlhttpRequest({
                     method: "GET",
                     url: this.initiateUrl,
@@ -257,9 +296,7 @@
                 });
             };
 
-            // Step 1: Scan the server-side Chat History for an existing Smart Agent thread
             const doFindExisting = () => {
-                console.log("🔍 [SmartAgent] Scanning server history for existing 'AIPro Smart Suggestions' thread...");
                 GM_xmlhttpRequest({
                     method: "GET",
                     url: this.historyLabelsUrl,
@@ -268,8 +305,6 @@
                         try {
                             const data = JSON.parse(res.responseText);
                             let foundId = null;
-                            
-                            // Recursive Scanner to hunt down the exact ID regardless of the JSON shape
                             const findIdInTree = (obj) => {
                                 if (Array.isArray(obj)) {
                                     for(let i of obj) { let result = findIdInTree(i); if(result) return result; }
@@ -285,22 +320,19 @@
                             foundId = findIdInTree(data);
 
                             if (foundId) {
-                                console.log("🔍 [SmartAgent] Found existing history thread:", foundId);
                                 GM_setValue('ai_pro_smart_agent_id', foundId);
                                 doGenerate(foundId);
                             } else {
-                                console.log("🔍 [SmartAgent] Thread not found in history. Must create new.");
                                 doInitiate();
                             }
                         } catch(e) {
-                            doInitiate(); // Fallback if parse fails
+                            doInitiate();
                         }
                     },
-                    onerror: () => doInitiate() // Fallback if network fails
+                    onerror: () => doInitiate() 
                 });
             };
 
-            // --- EXECUTION PIPELINE ---
             const cachedId = GM_getValue('ai_pro_smart_agent_id');
             if (cachedId && typeof cachedId === 'string' && cachedId.trim() !== '') {
                 doGenerate(cachedId);
@@ -632,7 +664,8 @@
         sdk.executeHeadlessPrompt(emailText, (res) => {
             if (res.error && res.error.includes("Auth Token")) {
                 currentEmailHash = ""; 
-                updateSmartDOM([{ id: 'smart_spin', icon: '⚠️', label: 'Login to AI Pro to activate', vector: '' }]);
+                // INTERACTIVE LOGIN FIX: Turns the error state into an actionable popup trigger
+                updateSmartDOM([{ id: 'smart_auth_req', icon: '⚠️', label: 'Click here to Login & Activate', vector: 'AUTH_REQUIRED' }]);
             } else if (res.data) {
                 const newItems = res.data.map((item, idx) => ({
                     id: `smart_dyn_${idx}`, icon: '✨', label: item.label, vector: item.prompt
@@ -649,6 +682,12 @@
     }
 
     function handleReplyMenuClick(id, vector) {
+        
+        // INTERACTIVE LOGIN FIX: Catch the user clicking the Auth Warning and force the popup
+        if (vector === 'AUTH_REQUIRED') {
+            return sdk.getAuthWindow();
+        }
+
         let r = getCleanEmailBody(); if(!r) return alert("⚠️ Select email text first."); 
         const win = sdk.needsAuth() ? sdk.getAuthWindow() : null;
         
