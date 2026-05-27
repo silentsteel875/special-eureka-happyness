@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         StateJobsNY responsive/full-width layout
 // @namespace    https://statejobsny.com/
-// @version      3.2.2
+// @version      3.3.6
 // @description  Makes StateJobsNY public and employee pages use the full viewport with configurable page settings.
 // @author       You
 // @match        https://statejobsny.com/public/*
@@ -29,6 +29,7 @@
   const CLEAR_BUTTON_ID = 'tm-statejobsny-clear-button';
   const COMPARE_ERROR_ID = 'tm-statejobsny-compare-error';
   const JUST_FOR_FUN_BUTTON_ID = 'tm-statejobsny-just-for-fun';
+  const SALARY_LOADING_TOAST_ID = 'tm-statejobsny-salary-loading-toast';
   const DEBUG_KEY = 'tm-statejobsny-debug';
   const STRIPE_PALETTE = ['#eee', '#ecdfff', '#ffe0f3', '#d8dcff', '#ddffce', '#fff6c1'];
 
@@ -89,12 +90,15 @@
   let closeDeadlineFilterActive = false;
   let vacancyRefreshScheduled = false;
   let funModeActive = false;
-  let funModeTimer = null;
+  let funModeFrame = null;
+  let funModeCells = [];
   let deadlinePulseTimer = null;
   let salaryLazyBound = false;
   let salaryLazyTickScheduled = false;
   let salaryLazyLoading = false;
   let salaryLazyPoller = null;
+  let salaryLoadPassDone = false;
+  let salaryLoadPassPromise = null;
   const salaryRangeCache = new Map();
   const salaryLazyListeners = [];
 
@@ -158,7 +162,6 @@
     },
   };
 
-
   const saveSettings = () => {
     try {
       window.localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
@@ -211,8 +214,11 @@
       #vacancyTable.tm-font-custom-size th, #vacancyTable.tm-font-custom-size td {
         font-size: var(--tm-table-font-size, 12px) !important;
       }
-      #vacancyTable tbody tr.odd td { background-color: var(--tm-stripe-odd, #eee) !important; }
-      #vacancyTable tbody tr.even td { background-color: var(--tm-stripe-even, #fff) !important; }
+
+      /* Base table stripes - disabled during fun mode so animations can run! */
+      body:not(.tm-fun-mode) #vacancyTable tbody tr.odd td { background-color: var(--tm-stripe-odd, #eee) !important; }
+      body:not(.tm-fun-mode) #vacancyTable tbody tr.even td { background-color: var(--tm-stripe-even, #fff) !important; }
+
       #vacancyTable .tm-compare-cell, #vacancyTable .tm-compare-header { width:1% !important; text-align:center !important; white-space:nowrap !important; }
       #vacancyTable th:nth-child(2), #vacancyTable td:nth-child(2),
       #vacancyTable th:nth-child(4), #vacancyTable td:nth-child(4),
@@ -295,6 +301,12 @@
       }
       .tm-stripe-color-picker option { color: transparent; }
 
+      /* FUN MODE STYLES */
+      body.tm-fun-mode #vacancyTable tbody td {
+        border: 1px solid rgba(0,0,0,0.1) !important;
+        transition: background-color 0.1s ease;
+      }
+
       @media (max-width: 980px) {
         #mainContent { grid-template-columns:minmax(0, 1fr) !important; grid-template-areas:"header" "nav" "content" "organ" "footer" !important; row-gap:12px !important; }
         #mainContent.tm-nav-collapsed { grid-template-columns:minmax(0, 1fr) !important; column-gap:0 !important; }
@@ -307,7 +319,6 @@
     document.head.appendChild(style);
     return style;
   };
-
 
   const ensureBaseUiStyle = () => {
     let style = document.getElementById(BASE_UI_STYLE_ID);
@@ -345,6 +356,33 @@
       #${COMPARE_BUTTON_ID}, #${CLEAR_BUTTON_ID} { margin-left:10px; }
       #${COMPARE_ERROR_ID} { color:#b00020; font-size:12px; margin-top:6px; }
       .tm-close-deadline-row-hidden { display:none !important; }
+      #${SALARY_LOADING_TOAST_ID} {
+        position: fixed !important;
+        top: 10px !important;
+        left: 50% !important;
+        transform: translateX(-50%) !important;
+        z-index: 10050 !important;
+        background: #1f2937 !important;
+        color: #fff !important;
+        border-radius: 999px !important;
+        padding: 8px 14px !important;
+        font-size: 12px !important;
+        display: inline-flex !important;
+        align-items: center !important;
+        gap: 8px !important;
+        box-shadow: 0 4px 10px rgba(0,0,0,0.25) !important;
+      }
+      #${SALARY_LOADING_TOAST_ID} .tm-spinner {
+        width: 12px !important;
+        height: 12px !important;
+        border: 2px solid rgba(255,255,255,0.35) !important;
+        border-top-color: #fff !important;
+        border-radius: 50% !important;
+        animation: tm-spin 0.7s linear infinite !important;
+      }
+      @keyframes tm-spin {
+        to { transform: rotate(360deg); }
+      }
     `;
     document.head.appendChild(style);
     return style;
@@ -487,7 +525,8 @@
 
   const ensureDeadlinePulseTimer = () => {
     stopDeadlinePulseTimer();
-    if (!settings.deadlinePulse || !enabled || !isVacancyTablePage()) return;
+    // Do not start pulsing if fun mode is active, it conflicts with the animations
+    if (funModeActive || !settings.deadlinePulse || !enabled || !isVacancyTablePage()) return;
     tickDeadlinePulse();
     deadlinePulseTimer = window.setInterval(tickDeadlinePulse, 650);
   };
@@ -498,6 +537,15 @@
     const numericText = String(valueText || '').replace(/[^0-9.]/g, '');
     const parsed = Number(numericText);
     return Number.isFinite(parsed) ? parsed : NaN;
+  };
+
+  const wait = (ms) => new Promise((resolve) => window.setTimeout(resolve, ms));
+
+  const shouldThrottleSalaryLoad = () => {
+    const lengthSelect = document.querySelector('select[name="vacancyTable_length"], #vacancyTable_wrapper .dt-length select');
+    if (!lengthSelect) return false;
+    const selectedValue = Number(lengthSelect.value);
+    return Number.isFinite(selectedValue) && selectedValue > 100;
   };
 
   const extractSalaryRangeFromHtml = (htmlText) => {
@@ -540,27 +588,30 @@
     });
   };
 
-  const getVacancyRowsNearViewport = () => {
-    const rows = Array.from(document.querySelectorAll('#vacancyTable tbody tr'));
-    if (!rows.length) return [];
-    const viewportTop = 0;
-    const viewportBottom = window.innerHeight;
-    let firstVisible = rows.findIndex((row) => {
-      const rect = row.getBoundingClientRect();
-      return rect.bottom >= viewportTop && rect.top <= viewportBottom;
-    });
-    if (firstVisible < 0) firstVisible = 0;
-    let lastVisible = firstVisible;
-    for (let i = firstVisible; i < rows.length; i += 1) {
-      const rect = rows[i].getBoundingClientRect();
-      if (rect.top > viewportBottom) break;
-      lastVisible = i;
+  const ensureSalaryLoadingToast = () => {
+    let toast = document.getElementById(SALARY_LOADING_TOAST_ID);
+    if (toast) return toast;
+    toast = document.createElement('div');
+    toast.id = SALARY_LOADING_TOAST_ID;
+    toast.innerHTML = '<span class="tm-spinner"></span><span>Loading salary ranges...</span>';
+    return toast;
+  };
+
+  const showSalaryLoadingToast = () => {
+    const toast = ensureSalaryLoadingToast();
+    if (!toast.isConnected) {
+      document.body.appendChild(toast);
     }
-    const from = Math.max(0, firstVisible - 10);
-    const to = Math.min(rows.length - 1, lastVisible + 10);
-    debugState.salaryLastViewportRange = `${from}-${to}`;
-    logDebug('salary viewport window', { firstVisible, lastVisible, prefetchFrom: from, prefetchTo: to, totalRows: rows.length });
-    return rows.slice(from, to + 1);
+  };
+
+  const hideSalaryLoadingToast = () => {
+    const toast = document.getElementById(SALARY_LOADING_TOAST_ID);
+    if (toast) toast.remove();
+  };
+
+  const resetSalaryLoadState = () => {
+    salaryLoadPassDone = false;
+    salaryLoadPassPromise = null;
   };
 
   const augmentGradeColumnWithSalary = async () => {
@@ -568,10 +619,13 @@
     const gradeIdx = getColumnIndexByHeader('Grade');
     if (!gradeIdx) return;
     salaryLazyLoading = true;
+    showSalaryLoadingToast();
     try {
-      const rows = getVacancyRowsNearViewport();
+      const throttleLoads = shouldThrottleSalaryLoad();
+      const rows = Array.from(document.querySelectorAll('#vacancyTable tbody tr'));
+      debugState.salaryLastViewportRange = `0-${Math.max(0, rows.length - 1)}`;
       debugState.salaryRowsConsidered += rows.length;
-      logDebug('salary lazy load tick', { considered: rows.length, viewportRange: debugState.salaryLastViewportRange });
+      logDebug('salary full load pass', { considered: rows.length, viewportRange: debugState.salaryLastViewportRange, throttleLoads });
       for (const row of rows) {
         const titleLink = row.querySelector('td a[href*="vacancyDetailsView.cfm"]');
         const gradeCell = row.children[gradeIdx - 1];
@@ -598,10 +652,15 @@
         } else {
           logDebugWarn('salary helper missing for row', { url });
         }
+        if (throttleLoads) {
+          await wait(250);
+        }
       }
+      salaryLoadPassDone = true;
       applyGradeSalaryFontSize();
     } finally {
       salaryLazyLoading = false;
+      hideSalaryLoadingToast();
     }
   };
 
@@ -612,7 +671,13 @@
       salaryLazyTickScheduled = false;
       debugState.salaryLazySchedules += 1;
       logDebug('scheduleLazySalaryLoad fired', { count: debugState.salaryLazySchedules });
-      augmentGradeColumnWithSalary();
+      if (!salaryLoadPassDone) {
+        if (!salaryLoadPassPromise) {
+          salaryLoadPassPromise = augmentGradeColumnWithSalary().finally(() => {
+            salaryLoadPassPromise = null;
+          });
+        }
+      }
     });
   };
 
@@ -648,58 +713,139 @@
     logDebug('salary lazy poller stopped');
   };
 
+  // --- UPDATED JAVASCRIPT-DRIVEN FUN MODE (SOFTER & SLOWER) --- //
   const stopFunModeAnimation = () => {
-    if (funModeTimer) {
-      window.clearInterval(funModeTimer);
-      funModeTimer = null;
-    }
     funModeActive = false;
+
+    if (funModeFrame) {
+      window.cancelAnimationFrame(funModeFrame);
+      funModeFrame = null;
+    }
+
+    document.body.classList.remove('tm-fun-mode');
+
     const button = document.getElementById(JUST_FOR_FUN_BUTTON_ID);
     if (button) {
       button.textContent = 'just for fun';
       button.setAttribute('aria-pressed', 'false');
     }
-    document.querySelectorAll('#vacancyTable tbody td').forEach((cell) => {
+
+    // Strip out all the math-generated inline styles
+    document.querySelectorAll('#vacancyTable tbody td').forEach(cell => {
       cell.style.removeProperty('background-color');
       cell.style.removeProperty('color');
     });
+
     normalizeVacancyRowStriping();
-    applyDeadlineStyling();
-    ensureDeadlinePulseTimer();
+    applyDeadlineStyling(); // Restores any overridden deadline text colors
+    ensureDeadlinePulseTimer(); // Starts pulsing back up
   };
 
   const startFunModeAnimation = () => {
     if (!isVacancyTablePage()) return;
     funModeActive = true;
+
+    stopDeadlinePulseTimer();
+
+    // Clear out any lingering inline styles
+    document.querySelectorAll('#vacancyTable tbody td').forEach(cell => {
+      cell.style.removeProperty('background-color');
+      cell.style.removeProperty('color');
+    });
+
+    document.body.classList.add('tm-fun-mode');
+
     const button = document.getElementById(JUST_FOR_FUN_BUTTON_ID);
     if (button) {
       button.textContent = 'just for fun (on)';
       button.setAttribute('aria-pressed', 'true');
     }
 
-    const animateFrame = () => {
-      const cells = Array.from(document.querySelectorAll('#vacancyTable tbody td'));
-      const t = Date.now() / 850;
-      cells.forEach((cell, i) => {
-        const hue = (Math.sin((i % 9) + t) * 70 + Math.cos((i / 5) + t * 0.7) * 40 + 220 + (i % 7) * 8 + t * 26) % 360;
-        const sat = 78;
-        const light = 88 - (Math.sin(t + (i / 11)) + 1) * 8;
-        cell.style.setProperty('background-color', `hsl(${Math.round(hue)}, ${sat}%, ${Math.round(light)}%)`, 'important');
-        cell.style.setProperty('color', '#3b1b4e', 'important');
+    // MAP THE GRID FOR MATH ANIMATIONS
+    funModeCells = [];
+    const tbody = document.querySelector('#vacancyTable tbody');
+    if (!tbody) return;
+
+    const rows = Array.from(tbody.querySelectorAll('tr'));
+    let maxCols = 0;
+
+    // Give every cell an X and Y coordinate
+    rows.forEach((row, rIdx) => {
+      const cells = Array.from(row.children);
+      maxCols = Math.max(maxCols, cells.length);
+      cells.forEach((cell, cIdx) => {
+        funModeCells.push({ el: cell, x: cIdx, y: rIdx });
       });
+    });
+
+    // Find the mathematical center of the table
+    const centerX = (maxCols - 1) / 2;
+    const centerY = (rows.length - 1) / 2;
+
+    // Pre-calculate distance formulas for the patterns
+    funModeCells.forEach(c => {
+      const dx = c.x - centerX;
+      const dy = c.y - centerY;
+      c.distEuclidean = Math.sqrt(dx * dx + dy * dy); // Used for Circles
+      c.distManhattan = Math.max(Math.abs(dx), Math.abs(dy)); // Used for Squares
+    });
+
+    // THE RENDER LOOP
+    const render = (time) => {
+      if (!funModeActive) return;
+      const t = time / 1000; // current time in seconds
+
+      // Cycle through 3 mathematical patterns every 15 seconds (Slower transitions)
+      const cycle = Math.floor(t / 15) % 3;
+      const phase = t * 2.5; // controls the speed of the pulse wave (Slower waves)
+      const hueBase = t * 15; // constantly shifts the base rainbow color (Slower shift)
+
+      funModeCells.forEach(c => {
+        let pulseRaw = 0;
+
+        if (cycle === 0) {
+          // Pattern 1: Circles radiating outwards (Wider, softer ripples)
+          pulseRaw = Math.sin(c.distEuclidean * 0.4 - phase);
+        } else if (cycle === 1) {
+          // Pattern 2: Flashing Checkers (Gentle cross-fade)
+          const isEven = (c.x + c.y) % 2 === 0;
+          pulseRaw = Math.sin(phase) * (isEven ? 1 : -1);
+        } else {
+          // Pattern 3: Squares radiating outwards (Wider bands)
+          pulseRaw = Math.sin(c.distManhattan * 0.4 - phase);
+        }
+
+        // pulseRaw is a sine wave spanning from -1 to 1.
+        // Normalize it so it spans from 0 to 1 smoothly.
+        const pulseNorm = (pulseRaw + 1) / 2;
+
+        // Map the pulse to Lightness: 75% to 95% (Always soft pastels)
+        const l = 75 + (pulseNorm * 20);
+
+        // Add spatial distance to the hue to create rainbow gradients across the waves
+        const h = (hueBase + c.distEuclidean * 10) % 360;
+
+        // Blast the styles directly onto the element. Fixed 80% saturation.
+        c.el.style.setProperty('background-color', `hsl(${h}, 80%, ${l}%)`, 'important');
+        // Because the background is always light, force dark text for readability
+        c.el.style.setProperty('color', '#111', 'important');
+      });
+
+      funModeFrame = window.requestAnimationFrame(render);
     };
 
-    animateFrame();
-    funModeTimer = window.setInterval(animateFrame, 220);
+    // Start the engine
+    funModeFrame = window.requestAnimationFrame(render);
   };
 
   const toggleFunModeAnimation = () => {
     if (funModeActive) {
       stopFunModeAnimation();
-      return;
+    } else {
+      startFunModeAnimation();
     }
-    startFunModeAnimation();
   };
+  // --------------------------------- //
 
   const applyAgencyColumnMode = () => {
     const table = document.getElementById('vacancyTable');
@@ -756,7 +902,9 @@
   const applyDeadlineStyling = () => {
     if (!enabled) return;
     const deadlineIdx = getDeadlineColumnIndex();
-    if (deadlineIdx) {
+
+    // Skip messing with backgrounds if fun mode is active
+    if (!funModeActive && deadlineIdx) {
       document.querySelectorAll(`#vacancyTable tbody tr td:nth-child(${deadlineIdx})`).forEach((cell) => {
         const apply = settings.highlightDeadlineApproaching && isApproachingDate(cell.textContent);
         cell.classList.toggle('tm-urgent-deadline', apply);
@@ -1520,6 +1668,7 @@
       ensureCompareColumn();
       ensureCompareButton();
       ensureCloseDeadlineLink();
+      resetSalaryLoadState();
       bindLazySalaryLoader();
       startLazySalaryPoller();
       scheduleLazySalaryLoad();
@@ -1594,6 +1743,7 @@
     applyDeadlineStyling();
     ensureCompareColumn();
     ensureCompareButton();
+    resetSalaryLoadState();
     bindLazySalaryLoader();
     startLazySalaryPoller();
     scheduleLazySalaryLoad();
@@ -1639,6 +1789,8 @@
       stopDeadlinePulseTimer();
       stopLazySalaryPoller();
       stopFunModeAnimation();
+      resetSalaryLoadState();
+      hideSalaryLoadingToast();
       resetVacancyUiState();
       removeStyle();
       stopLengthObserver();
