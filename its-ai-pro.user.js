@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         ITS AI Pro — Custom Instructions Injector
+// @name         ITS AI Pro — Ultimate Web Enhancer (Model Router + Custom Instructions)
 // @namespace    https://its.ny.gov/
-// @version      2.5.0
-// @description  Persists custom system instructions in browser storage and silently injects them into every AI Pro request. Handles combined-input character-limit overflows gracefully.
+// @version      4.0.0
+// @description  Unified interception platform: Native Model Routing (with SSE spoofing) + Advanced Custom Instructions injection (Auto/Vertex/OpenAI formats).
 // @author       ITS Platform Team
 // @match        https://pro.ai.ny.gov/*
 // @grant        GM_setValue
@@ -11,1081 +11,493 @@
 // @run-at       document-start
 // ==/UserScript==
 
-/*
- * ─────────────────────────────────────────────────────────────────────────────
- *  CONFIGURATION
- * ─────────────────────────────────────────────────────────────────────────────
- *
- *  URL_PATTERN_REGEX
- *    Matches the real AI Pro API endpoint at proapi.ai.ny.gov plus fallback
- *    patterns for local dev and any Vertex / OpenAI proxy environments.
- *
- *  REQUEST_FORMAT  (default "auto"; overridable in the settings panel)
- *    "auto"   → inspect the live payload and choose the right format
- *    "aipro"  → AI Pro native: injects into the `userMessage` field inside
- *               the FormData Blob.  This is the correct format for production.
- *    "vertex" → writes/merges top-level `systemInstruction`
- *    "openai" → prepends/merges a { role:"system" } message
- *    "prefix" → prepends to the first user-text field found
- *
- *  HARD_CHAR_LIMIT / RESERVE_RESPONSE_CHARS
- *    effectiveLimit = HARD_CHAR_LIMIT − RESERVE_RESPONSE_CHARS
- *    Overflow fires when (instruction + user text) > effectiveLimit.
- *    Gemini 2.5 Flash Lite context ≈ 1 M tokens.  Default ceiling is
- *    conservative; raise it if you know your model's actual window.
- *
- *  OVERFLOW_STRATEGY  (default; overridable in the settings panel)
- *    "truncate-instruction" → silently trim instruction to fit
- *    "truncate-input"       → trim userMessage to fit (use rarely)
- *    "warn-and-skip"        → banner warning; send request unmodified
- *    "block"                → banner warning; abort the request
- *
- * ─────────────────────────────────────────────────────────────────────────────
- *  MIDDLEWARE API  (for advanced users / future extensions)
- * ─────────────────────────────────────────────────────────────────────────────
- *
- *  Register additional payload transforms after this script loads:
- *
- *    window.__aiproCIRegister(function myTransform(payload, context) {
- *      // payload = the parsed inner JSON (userMessage, chatModel, conversationId…)
- *      // context = { type: "fetch"|"fetch-formdata"|"xhr", url: string }
- *      return payload;  // return modified or original payload
- *    });
- *
- *  Middleware runs in registration order after the built-in CI injection.
- *  Errors in middleware are caught and logged; the pipeline continues.
- *
- * ─────────────────────────────────────────────────────────────────────────────
- *  HOW AI PRO REQUESTS ARE STRUCTURED (from network telemetry)
- * ─────────────────────────────────────────────────────────────────────────────
- *
- *  POST https://proapi.ai.ny.gov/api/v1/vertexai/multiModalInputList/generateTextContent
- *  Authorization: Bearer <MSAL JWT>
- *  Content-Type: multipart/form-data
- *
- *  FormData:
- *    message: Blob(application/json) → {
- *      userMessage:    "<the prompt text>",
- *      chatModel:      "gemini-2.5-flash-lite",
- *      conversationId: "<uuid from /vertexai/initiateChat>"
- *    }
- *
- *  Response: Server-Sent Events stream  (data: … chunks)
- *
- *  Injection target: innerJSON.userMessage
- *  Format: [Custom Instructions]\n<instruction>\n\n---\n\n<original userMessage>
- */
+(function () {
+    'use strict';
 
-const CONFIG = {
-  // Matches the real AI Pro backend plus local-dev and generic proxy patterns
-  URL_PATTERN_REGEX: /(?:proapi\.ai\.ny\.gov|vertexai\/multiModalInputList|aiplatform\.googleapis\.com|:generateContent|:streamGenerateContent|\/api\/chat|\/api\/generate|\/v1\/messages|\/completions)/i,
+    // 1. Prevent running inside iframes (Outlook slider) or Auth Popups
+    if (window.top !== window.self) return;
+    if (window.name === 'AI_PRO_AUTH') return;
 
-  REQUEST_FORMAT:         "auto",
-  HARD_CHAR_LIMIT:        500_000,
-  RESERVE_RESPONSE_CHARS: 8_000,
-  OVERFLOW_STRATEGY:      "truncate-instruction",
-  PANEL_HOTKEY:           "Shift+Alt+I",
-  STORAGE_KEY:            "aipro_ci_v2",
-};
+    console.log("[ITS Enhancer v4.0] Initializing Unified Native Web Client Enhancer...");
 
-// ─────────────────────────────────────────────────────────────────────────────
-//  STATE
-// ─────────────────────────────────────────────────────────────────────────────
-
-const DEFAULT_SETTINGS = {
-  enabled:              true,
-  instruction:          "",
-  requestFormat:        CONFIG.REQUEST_FORMAT,
-  overflowStrategy:     CONFIG.OVERFLOW_STRATEGY,
-  hardCharLimit:        CONFIG.HARD_CHAR_LIMIT,
-  reserveResponseChars: CONFIG.RESERVE_RESPONSE_CHARS,
-  debug:                false,
-  requestCount:         0,
-  injectedCount:        0,
-  skippedCount:         0,
-};
-
-let SETTINGS = loadSettings();
-
-function loadSettings() {
-  try {
-    const raw = (typeof GM_getValue !== "undefined")
-      ? GM_getValue(CONFIG.STORAGE_KEY, null)
-      : localStorage.getItem(CONFIG.STORAGE_KEY);
-    if (raw) return { ...DEFAULT_SETTINGS, ...JSON.parse(raw) };
-  } catch (_) {}
-  return { ...DEFAULT_SETTINGS };
-}
-
-function saveSettings() {
-  const json = JSON.stringify(SETTINGS);
-  try {
-    if (typeof GM_setValue !== "undefined") GM_setValue(CONFIG.STORAGE_KEY, json);
-    localStorage.setItem(CONFIG.STORAGE_KEY, json);
-  } catch (e) {
-    console.warn("[AI Pro CI] Could not persist settings:", e);
-  }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-//  MIDDLEWARE PIPELINE
-// ─────────────────────────────────────────────────────────────────────────────
-
-const _middleware = [];
-
-function registerMiddleware(fn) { _middleware.push(fn); }
-
-function processMiddleware(payload, context) {
-  let current = payload;
-  for (const fn of _middleware) {
-    try { current = fn(current, context) ?? current; }
-    catch (err) { console.error("[AI Pro CI] Middleware error (continuing):", err); }
-  }
-  return current;
-}
-
-window.__aiproCIRegister = registerMiddleware;
-
-// ─────────────────────────────────────────────────────────────────────────────
-//  PAYLOAD FORMAT AUTO-DETECTION
-//
-//  Priority: aipro first (most specific for this domain), then generic formats.
-// ─────────────────────────────────────────────────────────────────────────────
-
-function detectPayloadFormat(payload) {
-  // AI Pro native API: { userMessage, chatModel, conversationId }
-  if (typeof payload?.userMessage === "string")   return "aipro";
-
-  // Vertex AI generateContent: { contents[], systemInstruction }
-  if (Array.isArray(payload?.contents))           return "vertex";
-  if (payload?.systemInstruction)                 return "vertex";
-
-  // OpenAI-compatible: { messages[] }
-  if (Array.isArray(payload?.messages))           return "openai";
-
-  // Prompt / text fields (generic proxy)
-  if (typeof payload?.prompt === "string")        return "prefix";
-  if (typeof payload?.text   === "string")        return "prefix";
-
-  return "vertex";  // safe fallback
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-//  INTERCEPT GATE
-// ─────────────────────────────────────────────────────────────────────────────
-
-function shouldIntercept(url) {
-  return !!(url && CONFIG.URL_PATTERN_REGEX.test(url));
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-//  REQUEST INTERCEPTION  —  patched at document-start before page scripts run
-// ─────────────────────────────────────────────────────────────────────────────
-
-(function patchFetch() {
-  const _fetch = window.fetch;
-  window.fetch = async function (input, init = {}) {
-    const url = (typeof input === "string") ? input : input?.url ?? "";
-    if (SETTINGS.enabled && SETTINGS.instruction.trim() && shouldIntercept(url)) {
-      SETTINGS.requestCount++;
-      init = await tryInjectFetch(init, url);
-    }
-    return _fetch.call(this, input, init);
-  };
-})();
-
-(function patchXHR() {
-  const _open = XMLHttpRequest.prototype.open;
-  const _send = XMLHttpRequest.prototype.send;
-
-  XMLHttpRequest.prototype.open = function (method, url, ...rest) {
-    this._xhrUrl = url;
-    return _open.call(this, method, url, ...rest);
-  };
-
-  // XHR send() stays synchronous. AI Pro's SSE stream uses fetch, not XHR,
-  // so this path mainly covers config/history calls which are plain JSON.
-  XMLHttpRequest.prototype.send = function (body) {
-    if (
-      SETTINGS.enabled &&
-      SETTINGS.instruction.trim() &&
-      shouldIntercept(this._xhrUrl ?? "") &&
-      typeof body === "string"
-    ) {
-      body = tryInjectSyncXHR(body, this._xhrUrl);
-      SETTINGS.requestCount++;
-    }
-    return _send.call(this, body);
-  };
-})();
-
-// ─────────────────────────────────────────────────────────────────────────────
-//  INJECTION DRIVERS
-// ─────────────────────────────────────────────────────────────────────────────
-
-async function tryInjectFetch(init, url) {
-  try {
-    const rawBody = init.body;
-    if (!rawBody) return init;
-
-    // ── AI Pro native: FormData with a JSON Blob in the "message" field ──────
-    if (rawBody instanceof FormData) {
-      return await tryInjectFormData(init, url);
-    }
-
-    // ── Standard JSON body (dev/proxy/other formats) ──────────────────────────
-    const bodyStr = typeof rawBody === "string" ? rawBody : await blobOrBufferToText(rawBody);
-    if (!bodyStr) return init;
-
-    const payload  = JSON.parse(bodyStr);
-    const modified = processMiddleware(payload, { type: "fetch", url });
-
-    if (modified.__ci_skipped) {
-      if (SETTINGS.overflowStrategy === "block") {
-        throw new DOMException("AI Pro CI: request blocked — limit exceeded.", "AbortError");
-      }
-      return init;
-    }
-
-    if (SETTINGS.debug) console.log("[AI Pro CI] fetch JSON payload →", modified);
-    return { ...init, body: JSON.stringify(modified) };
-
-  } catch (e) {
-    if (e.name === "AbortError") throw e;
-    console.warn("[AI Pro CI] Fetch injection failed — sent unmodified.", e);
-    return init;
-  }
-}
-
-async function tryInjectFormData(init, url) {
-  /*
-   * AI Pro sends:  FormData { message: Blob(application/json) }
-   * The Blob contains:  { userMessage, chatModel, conversationId }
-   * We extract the Blob, parse it, run middleware, then re-pack.
-   * All other FormData fields (file attachments, etc.) are preserved exactly.
-   */
-  try {
-    const formData = init.body;
-    const msgBlob  = formData.get("message");
-
-    if (!(msgBlob instanceof Blob)) return init;
-
-    const innerText    = await msgBlob.text();
-    const innerPayload = JSON.parse(innerText);
-
-    const modified = processMiddleware(innerPayload, { type: "fetch-formdata", url });
-
-    if (modified.__ci_skipped) {
-      if (SETTINGS.overflowStrategy === "block") {
-        throw new DOMException("AI Pro CI: request blocked — limit exceeded.", "AbortError");
-      }
-      return init;
-    }
-
-    if (SETTINGS.debug) console.log("[AI Pro CI] FormData inner payload →", modified);
-
-    // Re-build FormData preserving every field; replace "message" with modified Blob
-    const newFormData = new FormData();
-    for (const [key, val] of formData.entries()) {
-      if (key !== "message") newFormData.append(key, val);
-    }
-    const newBlob = new Blob([JSON.stringify(modified)], { type: msgBlob.type || "application/json" });
-    newFormData.append("message", newBlob, "message");
-
-    return { ...init, body: newFormData };
-
-  } catch (e) {
-    if (e.name === "AbortError") throw e;
-    console.warn("[AI Pro CI] FormData injection failed — sent unmodified.", e);
-    return init;
-  }
-}
-
-function tryInjectSyncXHR(bodyStr, url) {
-  try {
-    const payload  = JSON.parse(bodyStr);
-    const modified = processMiddleware(payload, { type: "xhr", url });
-    if (modified.__ci_skipped) return bodyStr;
-    if (SETTINGS.debug) console.log("[AI Pro CI] XHR payload →", modified);
-    return JSON.stringify(modified);
-  } catch (e) {
-    console.warn("[AI Pro CI] XHR injection failed — sent unmodified.", e);
-    return bodyStr;
-  }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-//  BUILT-IN CI INJECTION MIDDLEWARE  —  registered as the first middleware
-// ─────────────────────────────────────────────────────────────────────────────
-
-function ciInjectionMiddleware(payload /*, context */) {
-  if (!SETTINGS.enabled || !SETTINGS.instruction.trim()) return payload;
-
-  const result = injectInstruction(payload, SETTINGS.instruction, SETTINGS);
-
-  if (result.skipped) {
-    SETTINGS.skippedCount++;
-    saveSettings();
-    showBanner(result.reason, "warn");
-    return { ...payload, __ci_skipped: true };
-  }
-
-  SETTINGS.injectedCount++;
-  saveSettings();
-  return result.payload;
-}
-
-registerMiddleware(ciInjectionMiddleware);
-
-// ─────────────────────────────────────────────────────────────────────────────
-//  INJECTION LOGIC
-// ─────────────────────────────────────────────────────────────────────────────
-
-function injectInstruction(payload, instruction, settings) {
-  const format = (settings.requestFormat === "auto")
-    ? detectPayloadFormat(payload)
-    : settings.requestFormat;
-
-  const strategy      = settings.overflowStrategy;
-  const effectiveLimit = Math.max(1000,
-    settings.hardCharLimit - (settings.reserveResponseChars ?? 0)
-  );
-
-  // ── AI Pro native format ───────────────────────────────────────────────────
-  //  Payload: { userMessage, chatModel, conversationId }
-  //  Inject:  prepend instruction to userMessage with a clear separator.
-  //  Note:    There is no system-instruction field in this API.
-  if (format === "aipro") {
-    const userText  = payload.userMessage ?? "";
-    const combined  = instruction.length + userText.length;
-    let   finalInst = instruction;
-
-    if (combined > effectiveLimit) {
-      const r = handleOverflow(instruction, userText, effectiveLimit, strategy, payload, "aipro");
-      if (r.skip)    return { skipped: true, reason: r.reason };
-      if (r.payload) return { payload: r.payload };
-      finalInst = r.instruction;
-    }
-
-    const cloned = safeClone(payload);
-    cloned.userMessage = `[Custom Instructions]\n${finalInst}\n\n---\n\n${userText}`;
-    return { payload: cloned };
-  }
-
-  // ── Vertex AI generateContent ──────────────────────────────────────────────
-  if (format === "vertex") {
-    const userText  = extractVertexUserText(payload);
-    const combined  = instruction.length + userText.length;
-    let   finalInst = instruction;
-
-    if (combined > effectiveLimit) {
-      const r = handleOverflow(instruction, userText, effectiveLimit, strategy, payload, "vertex");
-      if (r.skip)    return { skipped: true, reason: r.reason };
-      if (r.payload) return { payload: r.payload };
-      finalInst = r.instruction;
-    }
-
-    const cloned = safeClone(payload);
-    cloned.systemInstruction = {
-      role:  "system",
-      parts: [{ text: mergeWithExisting(finalInst, cloned.systemInstruction) }],
+    /**********************************************************************
+     * GLOBAL CONFIGURATION & STATE
+     **********************************************************************/
+    const CONFIG = {
+        URL_PATTERN_REGEX: /(?:proapi\.ai\.ny\.gov|aiplatform\.googleapis\.com|generateTextContent|initiateChat|\/api\/chat|\/api\/v1)/i,
+        HARD_CHAR_LIMIT: 500000,
+        RESERVE_RESPONSE_CHARS: 2000,
+        PANEL_HOTKEY: "Shift+Alt+I",
+        STORAGE_ACTIVE: "aipro_ci_active",
+        STORAGE_TEXT: "aipro_ci_text",
+        STORAGE_POS: "aipro_ci_position",
+        STORAGE_MODEL: "aipro_main_selected_model",
+        STORAGE_FORMAT: "aipro_ci_format",
+        STORAGE_OVERFLOW: "aipro_ci_overflow"
     };
-    return { payload: cloned };
-  }
 
-  // ── OpenAI-compatible ──────────────────────────────────────────────────────
-  if (format === "openai") {
-    const msgs      = payload.messages ?? [];
-    const userText  = msgs.filter(m => m.role === "user").map(m => m.content ?? "").join(" ");
-    const combined  = instruction.length + userText.length;
-    let   finalInst = instruction;
+    const STATE = {
+        ciActive: GM_getValue(CONFIG.STORAGE_ACTIVE, false),
+        ciText: GM_getValue(CONFIG.STORAGE_TEXT, ""),
+        ciPosition: GM_getValue(CONFIG.STORAGE_POS, "pre"),
+        selectedModel: GM_getValue(CONFIG.STORAGE_MODEL, "gemini-3.1-pro"),
+        format: GM_getValue(CONFIG.STORAGE_FORMAT, "auto"),
+        overflow: GM_getValue(CONFIG.STORAGE_OVERFLOW, "truncate-instruction")
+    };
 
-    if (combined > effectiveLimit) {
-      const r = handleOverflow(instruction, userText, effectiveLimit, strategy, payload, "openai");
-      if (r.skip) return { skipped: true, reason: r.reason };
-      finalInst = r.instruction ?? instruction;
-    }
+    // Register Menu Command for easy access
+    GM_registerMenuCommand("⚙️ Open Enhancer Settings", () => {
+        const panel = document.getElementById('_ci_settings_panel');
+        if (panel) panel.classList.add('open');
+    });
 
-    const cloned  = safeClone(payload);
-    if (!cloned.messages) cloned.messages = [];
-    const sysIdx  = cloned.messages.findIndex(m => m.role === "system");
-    const sysText = mergeWithExisting(finalInst, sysIdx >= 0 ? cloned.messages[sysIdx].content : null);
+    /**********************************************************************
+     * PAYLOAD MUTATION LOGIC
+     **********************************************************************/
+    function applyOverflowStrategy(userText, instText) {
+        const effectiveLimit = CONFIG.HARD_CHAR_LIMIT - CONFIG.RESERVE_RESPONSE_CHARS;
+        const totalLen = userText.length + instText.length;
 
-    if (sysIdx >= 0) {
-      cloned.messages[sysIdx].content = sysText;
-    } else {
-      cloned.messages.unshift({ role: "system", content: sysText });
-    }
-    return { payload: cloned };
-  }
+        if (totalLen <= effectiveLimit) return { userText, instText, blocked: false };
 
-  // ── Prefix / custom envelope ───────────────────────────────────────────────
-  if (format === "prefix") {
-    const cloned    = safeClone(payload);
-    const userField = findFirstUserTextField(cloned);
-    if (!userField) return { payload: cloned };
+        console.warn(`[ITS Enhancer] Overflow detected: ${totalLen} > ${effectiveLimit}. Strategy: ${STATE.overflow}`);
 
-    const combined = instruction.length + (userField.value ?? "").length;
-
-    if (combined > effectiveLimit) {
-      const r = handleOverflow(instruction, userField.value ?? "", effectiveLimit, strategy, payload, "prefix");
-      if (r.skip) return { skipped: true, reason: r.reason };
-      userField.set((r.instruction ?? instruction) + "\n\n---\n\n" + userField.value);
-      return { payload: cloned };
-    }
-
-    userField.set("[Custom Instructions]\n" + instruction + "\n\n---\n\n" + userField.value);
-    return { payload: cloned };
-  }
-
-  return { payload };
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-//  OVERFLOW HANDLER
-// ─────────────────────────────────────────────────────────────────────────────
-
-function handleOverflow(instruction, userText, effectiveLimit, strategy, payload, format) {
-  const excess = (instruction.length + userText.length) - effectiveLimit;
-  const pct    = Math.round((excess / effectiveLimit) * 100);
-  const msg    = `Custom instruction + user input exceeds limit by ~${excess.toLocaleString()} chars (${pct}% over).`;
-
-  switch (strategy) {
-
-    case "truncate-instruction": {
-      const maxInst = Math.max(0, effectiveLimit - userText.length - 100);
-      const trimmed = instruction.slice(0, maxInst) +
-        (maxInst < instruction.length ? "\n… [instruction truncated to fit context limit]" : "");
-      console.warn(`[AI Pro CI] ${msg} Instruction trimmed to ${maxInst} chars.`);
-      return { instruction: trimmed };
-    }
-
-    case "truncate-input": {
-      const maxUser = Math.max(0, effectiveLimit - instruction.length - 100);
-      console.warn(`[AI Pro CI] ${msg} User input trimmed.`);
-      const cloned = safeClone(payload);
-
-      if (format === "aipro") {
-        // Trim the userMessage field directly
-        cloned.userMessage = (cloned.userMessage ?? "").slice(0, maxUser) + "… [truncated]";
-
-      } else if (format === "openai" && cloned.messages) {
-        const lastUser = [...cloned.messages].reverse().find(m => m.role === "user");
-        if (lastUser) lastUser.content = lastUser.content.slice(0, maxUser) + "… [truncated]";
-
-      } else if (format === "vertex" && cloned.contents) {
-        const lastUser = [...cloned.contents].reverse().find(c => c.role === "user");
-        if (lastUser?.parts?.[0]) {
-          lastUser.parts[0].text = lastUser.parts[0].text.slice(0, maxUser) + "… [truncated]";
+        if (STATE.overflow === "block-request") {
+            return { userText, instText, blocked: true };
         }
-      }
-      return { payload: cloned };
+
+        if (STATE.overflow === "truncate-instruction") {
+            const spaceForInst = Math.max(0, effectiveLimit - userText.length);
+            return { userText, instText: instText.substring(0, spaceForInst), blocked: false };
+        }
+
+        if (STATE.overflow === "truncate-prompt") {
+            const spaceForPrompt = Math.max(0, effectiveLimit - instText.length);
+            return { userText: userText.substring(0, spaceForPrompt), instText, blocked: false };
+        }
+
+        return { userText, instText, blocked: false };
     }
 
-    case "warn-and-skip":
-      return { skip: true, reason: msg + " Instruction skipped for this request." };
+    function injectInstructions(payload) {
+        let fmt = STATE.format;
+        const instBlock = `\n\n[SYSTEM DIRECTIVE: Follow these instructions strictly]\n${STATE.ciText}\n[/END SYSTEM DIRECTIVE]\n`;
 
-    case "block":
-      return { skip: true, reason: msg + " Request blocked. Shorten your instruction or message." };
+        // 1. Native AI Pro Format (UserMessage String)
+        if ((fmt === "auto" || fmt === "aipro") && payload.userMessage !== undefined) {
+            let { userText, instText, blocked } = applyOverflowStrategy(payload.userMessage || "", instBlock);
+            if (blocked) throw new Error("OVERFLOW_BLOCKED");
+            payload.userMessage = STATE.ciPosition === "pre" ? instText + "\n" + userText : userText + "\n" + instText;
+            return true;
+        }
 
-    default:
-      return { instruction: instruction.slice(0, Math.max(0, effectiveLimit - userText.length)) };
-  }
-}
+        // 2. Vertex AI Format (systemInstruction object)
+        if ((fmt === "auto" || fmt === "vertex") && (payload.contents !== undefined || payload.instances !== undefined)) {
+            // Vertex uses top-level systemInstruction
+            if (!payload.systemInstruction) payload.systemInstruction = { parts: [] };
+            let currentSys = payload.systemInstruction.parts.map(p => p.text).join(" ");
+            let { userText, instText, blocked } = applyOverflowStrategy(currentSys, instBlock);
+            if (blocked) throw new Error("OVERFLOW_BLOCKED");
+            payload.systemInstruction = { parts: [{ text: STATE.ciPosition === "pre" ? instText + "\n" + userText : userText + "\n" + instText }] };
+            return true;
+        }
 
-// ─────────────────────────────────────────────────────────────────────────────
-//  UTILITIES
-// ─────────────────────────────────────────────────────────────────────────────
+        // 3. OpenAI API Format (messages array)
+        if ((fmt === "auto" || fmt === "openai") && Array.isArray(payload.messages)) {
+            let sysMsg = payload.messages.find(m => m.role === "system");
+            if (sysMsg) {
+                let { userText, instText, blocked } = applyOverflowStrategy(sysMsg.content, instBlock);
+                if (blocked) throw new Error("OVERFLOW_BLOCKED");
+                sysMsg.content = STATE.ciPosition === "pre" ? instText + "\n" + userText : userText + "\n" + instText;
+            } else {
+                let { userText, instText, blocked } = applyOverflowStrategy("", instBlock);
+                if (blocked) throw new Error("OVERFLOW_BLOCKED");
+                payload.messages.unshift({ role: "system", content: instText });
+            }
+            return true;
+        }
 
-function mergeWithExisting(newText, existing) {
-  if (!existing) return newText;
-  const existingText = typeof existing === "string"
-    ? existing
-    : existing?.parts?.[0]?.text ?? "";
-  if (!existingText.trim()) return newText;
-  return newText + "\n\n---\n\n[Original system context]\n" + existingText;
-}
-
-function extractVertexUserText(payload) {
-  return (payload.contents ?? [])
-    .filter(c => c.role === "user")
-    .flatMap(c => (c.parts ?? []).map(p => p.text ?? ""))
-    .join(" ");
-}
-
-function findFirstUserTextField(obj) {
-  const candidates = ["message", "prompt", "text", "input", "query", "content"];
-  for (const key of candidates) {
-    if (typeof obj[key] === "string") {
-      return { value: obj[key], set: (v) => { obj[key] = v; } };
+        // 4. Generic Prefix Format (Fallback)
+        if (fmt === "prefix" || fmt === "auto") {
+            // Traverse object to find the first large string and inject
+            for (let key in payload) {
+                if (typeof payload[key] === 'string' && payload[key].length > 10) {
+                    let { userText, instText, blocked } = applyOverflowStrategy(payload[key], instBlock);
+                    if (blocked) throw new Error("OVERFLOW_BLOCKED");
+                    payload[key] = STATE.ciPosition === "pre" ? instText + "\n" + userText : userText + "\n" + instText;
+                    return true;
+                }
+            }
+        }
+        return false;
     }
-  }
-  for (const key of Object.keys(obj)) {
-    if (typeof obj[key] === "object" && obj[key] !== null && !Array.isArray(obj[key])) {
-      const sub = findFirstUserTextField(obj[key]);
-      if (sub) return sub;
+
+    /**********************************************************************
+     * UNIFIED FETCH INTERCEPTOR (THE MAN-IN-THE-MIDDLE)
+     **********************************************************************/
+    const originalFetch = window.fetch;
+    window.fetch = async function(...args) {
+        let [resource, config] = args;
+        let url = typeof resource === 'string' ? resource : (resource instanceof Request ? resource.url : '');
+        let hijackedModel = null;
+
+        // Target the standard API generation endpoints
+        if (url && CONFIG.URL_PATTERN_REGEX.test(url) && config && config.body) {
+            
+            // Handle FormData (Native AI Pro)
+            if (config.body instanceof FormData) {
+                const messageBlob = config.body.get('message');
+                if (messageBlob) {
+                    try {
+                        const text = await messageBlob.text();
+                        const payload = JSON.parse(text);
+                        let payloadModified = false;
+                        
+                        // A. MODEL ROUTER
+                        if (payload.chatModel && payload.chatModel !== STATE.selectedModel) {
+                            hijackedModel = STATE.selectedModel;
+                            payload.chatModel = STATE.selectedModel;
+                            console.log(`[ITS Enhancer] 🥷 Swapping Model: -> ${STATE.selectedModel}`);
+                            payloadModified = true;
+                        }
+
+                        // B. CUSTOM INSTRUCTIONS
+                        if (STATE.ciActive && STATE.ciText.trim().length > 0) {
+                            try {
+                                if (injectInstructions(payload)) {
+                                    console.log(`[ITS Enhancer] 💉 Injected ${STATE.ciText.length} chars of custom instructions using format: ${STATE.format}.`);
+                                    payloadModified = true;
+                                }
+                            } catch (err) {
+                                if (err.message === "OVERFLOW_BLOCKED") {
+                                    showToast("🛑 Request blocked. Payload exceeds hard character limit.", "warn");
+                                    return Promise.reject(new Error("Request Blocked by Overflow Strategy"));
+                                }
+                            }
+                        }
+
+                        // C. REPACKAGE
+                        if (payloadModified) {
+                            const newBlob = new Blob([JSON.stringify(payload)], { type: 'application/json' });
+                            const newFormData = new FormData();
+                            for (let [key, value] of config.body.entries()) {
+                                if (key === 'message') newFormData.append(key, newBlob, 'blob');
+                                else newFormData.append(key, value);
+                            }
+                            config.body = newFormData;
+                        }
+
+                    } catch (e) {
+                        console.error("[ITS Enhancer] ⚠️ Failed to parse/rewrite FormData payload", e);
+                    }
+                }
+            } 
+            // Handle Raw JSON (Proxy / Custom Backends)
+            else if (typeof config.body === 'string') {
+                try {
+                    const payload = JSON.parse(config.body);
+                    let payloadModified = false;
+
+                    // A. MODEL ROUTER (For generic payloads)
+                    if (payload.model && payload.model !== STATE.selectedModel) {
+                        hijackedModel = STATE.selectedModel;
+                        payload.model = STATE.selectedModel;
+                        payloadModified = true;
+                    }
+
+                    // B. CUSTOM INSTRUCTIONS
+                    if (STATE.ciActive && STATE.ciText.trim().length > 0) {
+                        try {
+                            if (injectInstructions(payload)) payloadModified = true;
+                        } catch (err) {
+                            if (err.message === "OVERFLOW_BLOCKED") return Promise.reject(new Error("Request Blocked by Overflow Strategy"));
+                        }
+                    }
+
+                    // C. REPACKAGE
+                    if (payloadModified) {
+                        config.body = JSON.stringify(payload);
+                    }
+                } catch (e) {
+                    console.error("[ITS Enhancer] ⚠️ Failed to parse/rewrite JSON payload", e);
+                }
+            }
+        }
+
+        try {
+            // Release the modified request to the actual backend
+            const response = await originalFetch.apply(this, args);
+            
+            // --- GRACEFUL DEGRADATION: SSE SPOOFING ---
+            if (hijackedModel && !response.ok && (response.status === 400 || response.status === 403 || response.status === 404)) {
+                console.warn(`[ITS Enhancer] Backend rejected model ${hijackedModel}. Spoofing graceful error response.`);
+                showToast(`⚠️ Model '${hijackedModel}' is currently unavailable.`, 'warn');
+
+                const fakeMarkdown = `\n\n> ⚠️ **Model Routing Alert**\n> \n> The selected model (\`${hijackedModel}\`) is currently unavailable or restricted in this enterprise tenant. \n>\n> *Please use the settings panel (Shift+Alt+I) to select a different model and submit your prompt again.*`;
+                
+                const fakeStream = new ReadableStream({
+                    start(controller) {
+                        controller.enqueue(new TextEncoder().encode(`data: ${JSON.stringify({ text: fakeMarkdown })}\n\n`));
+                        controller.close();
+                    }
+                });
+                
+                return new Response(fakeStream, {
+                    status: 200,
+                    headers: { 'Content-Type': 'text/event-stream' }
+                });
+            }
+            return response;
+        } catch (err) {
+            return Promise.reject(err);
+        }
+    };
+
+    /**********************************************************************
+     * UNIFIED DOM & UI INJECTION
+     **********************************************************************/
+    function injectStyles() {
+        if (document.getElementById('_ci_styles')) return;
+        const style = document.createElement('style');
+        style.id = '_ci_styles';
+        style.innerHTML = `
+            :root {
+                --ci-primary: #005ea2; --ci-primary-hover: #004578; --ci-bg: #ffffff;
+                --ci-border: #e1dfdd; --ci-text: #323130; --ci-text-muted: #605e5c;
+                --ci-shadow: 0 8px 24px rgba(0,0,0,0.15); --ci-radius: 8px; --ci-z: 2147483647;
+                --ci-success: #107c41; --ci-warn: #d83b01;
+            }
+
+            ._ci_wrapper { position: fixed; bottom: 24px; right: 24px; z-index: var(--ci-z); font-family: 'Segoe UI', system-ui, sans-serif; }
+            
+            ._ci_toggle {
+                display: flex; align-items: center; gap: 8px; background: var(--ci-primary);
+                color: #fff; border: none; border-radius: 24px; padding: 10px 20px;
+                font-size: 14px; font-weight: 600; cursor: pointer; box-shadow: 0 4px 12px rgba(0,94,162,0.3);
+                transition: all 0.2s ease;
+            }
+            ._ci_toggle:hover { background: var(--ci-primary-hover); transform: translateY(-2px); box-shadow: 0 6px 16px rgba(0,94,162,0.4); }
+            ._ci_toggle[data-active="false"] { background: var(--ci-bg); color: var(--ci-text); border: 1px solid var(--ci-border); box-shadow: 0 4px 12px rgba(0,0,0,0.1); }
+            ._ci_toggle[data-active="false"]:hover { background: #f3f2f1; }
+            ._ci_status_dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ci-success); }
+            ._ci_toggle[data-active="false"] ._ci_status_dot { background: #a19f9d; }
+
+            ._ci_panel {
+                position: absolute; bottom: calc(100% + 12px); right: 0; width: 420px;
+                background: var(--ci-bg); border-radius: var(--ci-radius); box-shadow: var(--ci-shadow);
+                border: 1px solid var(--ci-border); display: none; flex-direction: column;
+                transform-origin: bottom right; animation: ci-pop 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+            }
+            ._ci_panel.open { display: flex; }
+            @keyframes ci-pop { 0% { opacity: 0; transform: scale(0.95); } 100% { opacity: 1; transform: scale(1); } }
+            
+            ._ci_header { display: flex; align-items: center; justify-content: space-between; padding: 16px; border-bottom: 1px solid var(--ci-border); background: #f9fafb; border-radius: var(--ci-radius) var(--ci-radius) 0 0; }
+            ._ci_title { font-size: 16px; font-weight: 600; color: var(--ci-text); margin: 0; display: flex; align-items: center; gap: 8px; }
+            ._ci_close { background: none; border: none; cursor: pointer; color: var(--ci-text-muted); padding: 4px; border-radius: 4px; display: flex; }
+            ._ci_close:hover { background: #e1dfdd; color: var(--ci-text); }
+            
+            ._ci_body { padding: 16px; display: flex; flex-direction: column; gap: 16px; max-height: 60vh; overflow-y: auto; }
+            
+            ._ci_section_title { font-size: 11px; font-weight: 700; text-transform: uppercase; color: var(--ci-text-muted); letter-spacing: 0.5px; margin-bottom: -4px; border-bottom: 1px solid var(--ci-border); padding-bottom: 4px; }
+            
+            ._ci_row { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+            ._ci_col { display: flex; flex-direction: column; gap: 6px; width: 100%; }
+            ._ci_label { font-size: 13px; font-weight: 600; color: var(--ci-text); display: flex; justify-content: space-between; }
+            
+            ._ci_select, ._ci_textarea {
+                width: 100%; padding: 8px 10px; border: 1px solid #c8c6c4; border-radius: 4px;
+                font-family: inherit; font-size: 13px; color: var(--ci-text); background: #fff;
+                outline: none; box-sizing: border-box;
+            }
+            ._ci_select:focus, ._ci_textarea:focus { border-color: var(--ci-primary); }
+            ._ci_textarea { height: 120px; resize: vertical; line-height: 1.5; background: #faf9f8; }
+            
+            ._ci_switch_group { display: flex; background: #f3f2f1; border-radius: 4px; padding: 2px; }
+            ._ci_switch_btn { background: none; border: none; padding: 6px 12px; font-size: 12px; font-weight: 600; color: var(--ci-text-muted); border-radius: 4px; cursor: pointer; flex: 1; }
+            ._ci_switch_btn.active { background: #fff; color: var(--ci-primary); box-shadow: 0 1px 2px rgba(0,0,0,0.1); }
+            
+            ._ci_footer { display: flex; align-items: center; justify-content: space-between; padding: 12px 16px; background: #f9fafb; border-top: 1px solid var(--ci-border); border-radius: 0 0 var(--ci-radius) var(--ci-radius); }
+            ._ci_btn_save { background: var(--ci-primary); color: #fff; border: none; padding: 8px 24px; border-radius: 4px; font-size: 13px; font-weight: 600; cursor: pointer; transition: background 0.2s; }
+            ._ci_btn_save:hover { background: var(--ci-primary-hover); }
+
+            #_ci_banner {
+                position: fixed; top: 16px; left: 50%; transform: translateX(-50%); z-index: var(--ci-z);
+                max-width: 520px; width: calc(100vw - 32px); padding: 12px 16px; border-radius: 8px;
+                font-size: 13px; font-weight: 500; box-shadow: 0 4px 16px rgba(0,0,0,0.18);
+                display: none; align-items: center; gap: 8px;
+            }
+            ._ci_banner--success { background: #dff6dd; border: 1px solid #c3e8c1; color: var(--ci-success); }
+            ._ci_banner--warn { background: #fff8e1; border: 1px solid #f39c12; color: #7d5a00; }
+        `;
+        document.head.appendChild(style);
     }
-  }
-  return null;
-}
 
-async function blobOrBufferToText(body) {
-  try {
-    if (body instanceof Blob)        return await body.text();
-    if (body instanceof ArrayBuffer) return new TextDecoder().decode(body);
-    if (ArrayBuffer.isView(body))    return new TextDecoder().decode(body.buffer);
-  } catch (_) {}
-  return null;
-}
+    function buildUI() {
+        if (document.getElementById('_ci_main_wrapper')) return;
 
-function safeClone(obj) {
-  return (typeof structuredClone !== "undefined")
-    ? structuredClone(obj)
-    : JSON.parse(JSON.stringify(obj));
-}
+        const wrapper = document.createElement('div');
+        wrapper.id = '_ci_main_wrapper';
+        wrapper.className = '_ci_wrapper';
 
-// ─────────────────────────────────────────────────────────────────────────────
-//  NOTIFICATION BANNER
-// ─────────────────────────────────────────────────────────────────────────────
+        const svgWand = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 4V2M15 16v-2M8 9h2M20 9h2M17.8 11.8L19 13M10.2 6.2L9 5M10.2 11.8L9 13M17.8 6.2L19 5M3 21l9-9M12.2 12.2l4.6-4.6"/></svg>`;
+        const svgClose = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="18" y1="6" x2="6" y2="18"></line><line x1="6" y1="6" x2="18" y2="18"></line></svg>`;
 
-let bannerTimeout;
-function showBanner(message, type = "warn") {
-  let banner = document.getElementById("_ci_banner");
-  if (!banner) {
-    banner = document.createElement("div");
-    banner.id = "_ci_banner";
-    document.body.appendChild(banner);
-  }
-  banner.className = `_ci_banner _ci_banner--${type}`;
-  banner.innerHTML = `<strong>AI Pro CI:</strong> ${escapeHtml(message)}`;
-  banner.style.display = "block";
-  clearTimeout(bannerTimeout);
-  bannerTimeout = setTimeout(() => { banner.style.display = "none"; }, 7000);
-}
+        wrapper.innerHTML = `
+            <button id="_ci_toggle_btn" class="_ci_toggle" data-active="${STATE.ciActive}">
+                ${svgWand} <span>Mission Control</span> <div class="_ci_status_dot"></div>
+            </button>
 
-function escapeHtml(str) {
-  return str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-}
+            <div id="_ci_settings_panel" class="_ci_panel">
+                <div class="_ci_header">
+                    <h3 class="_ci_title">⚙️ ITS Enhancer Settings</h3>
+                    <button id="_ci_close_btn" class="_ci_close">${svgClose}</button>
+                </div>
+                
+                <div class="_ci_body">
+                    <div class="_ci_section_title">Network Routing</div>
+                    <div class="_ci_col">
+                        <span class="_ci_label">Target AI Model</span>
+                        <select id="_ci_model_select" class="_ci_select">
+                            <option value="gemini-3.1-pro" ${STATE.selectedModel === 'gemini-3.1-pro' ? 'selected' : ''}>Gemini 3.1 Pro (Latest/Reasoning)</option>
+                            <option value="gemini-2.5-pro" ${STATE.selectedModel === 'gemini-2.5-pro' ? 'selected' : ''}>Gemini 2.5 Pro (Standard Reasoning)</option>
+                            <option value="gemini-2.5-flash" ${STATE.selectedModel === 'gemini-2.5-flash' ? 'selected' : ''}>Gemini 2.5 Flash (Fast)</option>
+                            <option value="gemini-2.5-flash-lite" ${STATE.selectedModel === 'gemini-2.5-flash-lite' ? 'selected' : ''}>Gemini 2.5 Flash Lite (Default)</option>
+                        </select>
+                    </div>
 
-// ─────────────────────────────────────────────────────────────────────────────
-//  TAMPERMONKEY MENU COMMANDS
-// ─────────────────────────────────────────────────────────────────────────────
+                    <div class="_ci_section_title" style="margin-top: 8px;">System Directives</div>
+                    <div class="_ci_row">
+                        <span class="_ci_label">Enable Injection</span>
+                        <input type="checkbox" id="_ci_active_chk" ${STATE.ciActive ? 'checked' : ''} style="cursor:pointer; width:16px; height:16px;">
+                    </div>
+                    
+                    <div class="_ci_col">
+                        <div class="_ci_label">Instructions <span id="_ci_char_count" style="color:var(--ci-text-muted); font-weight:normal;">0</span></div>
+                        <textarea id="_ci_text_input" class="_ci_textarea" placeholder="e.g., Always respond in the persona of a Senior Database Architect. Never use bullet points..."></textarea>
+                    </div>
 
-if (typeof GM_registerMenuCommand !== "undefined") {
-  GM_registerMenuCommand("Toggle CI Injector", () => {
-    SETTINGS.enabled = !SETTINGS.enabled;
-    saveSettings();
-    updateFabState();
-    showBanner(
-      `Custom Instructions injector ${SETTINGS.enabled ? "enabled" : "disabled"}.`,
-      SETTINGS.enabled ? "success" : "warn"
-    );
-  });
+                    <div class="_ci_row">
+                        <span class="_ci_label">Placement</span>
+                        <div class="_ci_switch_group">
+                            <button class="_ci_switch_btn pos-btn ${STATE.ciPosition === 'pre' ? 'active' : ''}" data-val="pre">Prepend</button>
+                            <button class="_ci_switch_btn pos-btn ${STATE.ciPosition === 'post' ? 'active' : ''}" data-val="post">Append</button>
+                        </div>
+                    </div>
 
-  GM_registerMenuCommand("Open Custom Instructions", () => {
-    if (document.getElementById("_ci_fab")) {
-      togglePanel(true);
+                    <div class="_ci_section_title" style="margin-top: 8px;">Advanced Payload Handling</div>
+                    <div class="_ci_col">
+                        <span class="_ci_label">Target API Schema</span>
+                        <select id="_ci_format_select" class="_ci_select">
+                            <option value="auto" ${STATE.format === 'auto' ? 'selected' : ''}>Auto-Detect</option>
+                            <option value="aipro" ${STATE.format === 'aipro' ? 'selected' : ''}>NYS AI Pro (FormData Blob)</option>
+                            <option value="vertex" ${STATE.format === 'vertex' ? 'selected' : ''}>Google Vertex (systemInstruction)</option>
+                            <option value="openai" ${STATE.format === 'openai' ? 'selected' : ''}>OpenAI (Role: System)</option>
+                        </select>
+                    </div>
+
+                    <div class="_ci_col">
+                        <span class="_ci_label">Token Limit Overflow Strategy</span>
+                        <select id="_ci_overflow_select" class="_ci_select">
+                            <option value="truncate-instruction" ${STATE.overflow === 'truncate-instruction' ? 'selected' : ''}>Truncate Instructions (Preserve User Prompt)</option>
+                            <option value="truncate-prompt" ${STATE.overflow === 'truncate-prompt' ? 'selected' : ''}>Truncate User Prompt (Preserve Instructions)</option>
+                            <option value="block-request" ${STATE.overflow === 'block-request' ? 'selected' : ''}>Block Request (Show Error)</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div class="_ci_footer">
+                    <span style="font-size:11px; color:var(--ci-text-muted);">Hotkey: ${CONFIG.PANEL_HOTKEY}</span>
+                    <button id="_ci_save_btn" class="_ci_btn_save">Save Changes</button>
+                </div>
+            </div>
+        `;
+        document.body.appendChild(wrapper);
+
+        // Bind DOM Elements
+        const toggleBtn = document.getElementById('_ci_toggle_btn');
+        const panel = document.getElementById('_ci_settings_panel');
+        const closeBtn = document.getElementById('_ci_close_btn');
+        const saveBtn = document.getElementById('_ci_save_btn');
+        const activeChk = document.getElementById('_ci_active_chk');
+        const textInput = document.getElementById('_ci_text_input');
+        const charCount = document.getElementById('_ci_char_count');
+        const posBtns = document.querySelectorAll('.pos-btn');
+
+        // Form Inputs
+        const modelSelect = document.getElementById('_ci_model_select');
+        const formatSelect = document.getElementById('_ci_format_select');
+        const overflowSelect = document.getElementById('_ci_overflow_select');
+
+        // Initialize values
+        textInput.value = STATE.ciText;
+        charCount.innerText = textInput.value.length;
+
+        // Toggle Panel
+        toggleBtn.addEventListener('click', () => panel.classList.toggle('open'));
+        closeBtn.addEventListener('click', () => panel.classList.remove('open'));
+
+        // Character Counter
+        textInput.addEventListener('input', () => charCount.innerText = textInput.value.length);
+
+        // Position Switches
+        posBtns.forEach(btn => {
+            btn.addEventListener('click', (e) => {
+                posBtns.forEach(b => b.classList.remove('active'));
+                e.target.classList.add('active');
+                STATE.ciPosition = e.target.getAttribute('data-val');
+            });
+        });
+
+        // Save Logic
+        saveBtn.addEventListener('click', () => {
+            STATE.ciActive = activeChk.checked;
+            STATE.ciText = textInput.value;
+            STATE.selectedModel = modelSelect.value;
+            STATE.format = formatSelect.value;
+            STATE.overflow = overflowSelect.value;
+            
+            GM_setValue(CONFIG.STORAGE_ACTIVE, STATE.ciActive);
+            GM_setValue(CONFIG.STORAGE_TEXT, STATE.ciText);
+            GM_setValue(CONFIG.STORAGE_POS, STATE.ciPosition);
+            GM_setValue(CONFIG.STORAGE_MODEL, STATE.selectedModel);
+            GM_setValue(CONFIG.STORAGE_FORMAT, STATE.format);
+            GM_setValue(CONFIG.STORAGE_OVERFLOW, STATE.overflow);
+
+            toggleBtn.setAttribute('data-active', STATE.ciActive);
+            panel.classList.remove('open');
+            
+            showToast(`✅ Enhancer Configuration Saved!`, 'success');
+        });
+
+        // Hotkey Listener
+        document.addEventListener('keydown', (e) => {
+            if (e.shiftKey && e.altKey && e.code === 'KeyI') {
+                e.preventDefault();
+                panel.classList.toggle('open');
+            }
+        });
+    }
+
+    function showToast(htmlMsg, type = 'success') {
+        let banner = document.getElementById('_ci_banner');
+        if (!banner) {
+            banner = document.createElement('div');
+            banner.id = '_ci_banner';
+            document.body.appendChild(banner);
+        }
+
+        banner.className = `_ci_banner--${type}`;
+        banner.innerHTML = htmlMsg;
+        banner.style.display = 'flex';
+        
+        setTimeout(() => { banner.style.display = 'none'; }, 4000);
+    }
+
+    // Boot the UI
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', () => { injectStyles(); buildUI(); });
     } else {
-      window.addEventListener("DOMContentLoaded", () => togglePanel(true), { once: true });
-    }
-  });
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-//  UI  —  injected after DOM is ready
-// ─────────────────────────────────────────────────────────────────────────────
-
-window.addEventListener("DOMContentLoaded", () => injectUI(), { once: true });
-if (document.readyState !== "loading") setTimeout(injectUI, 500);
-
-function injectUI() {
-  if (document.getElementById("_ci_fab")) return;
-
-  injectStyles();
-
-  const fab = document.createElement("button");
-  fab.id = "_ci_fab";
-  fab.title = `Custom Instructions (${CONFIG.PANEL_HOTKEY})`;
-  fab.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-    <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2z"/>
-    <path d="M12 16v-4m0-4h.01"/>
-  </svg>`;
-  fab.setAttribute("aria-label", "Toggle Custom Instructions Panel");
-
-  const panel = document.createElement("div");
-  panel.id = "_ci_panel";
-  panel.setAttribute("role", "dialog");
-  panel.setAttribute("aria-label", "Custom Instructions Settings");
-  panel.hidden = true;
-  panel.innerHTML = buildPanelHTML();
-
-  document.body.appendChild(fab);
-  document.body.appendChild(panel);
-
-  syncUIFromSettings();
-
-  fab.addEventListener("click", () => togglePanel());
-
-  panel.querySelector("#_ci_enabled").addEventListener("change", e => {
-    SETTINGS.enabled = e.target.checked;
-    updateFabState();
-    saveSettings();
-    syncStats();
-  });
-
-  const ta = panel.querySelector("#_ci_text");
-  ta.addEventListener("input", () => updateCharCounter(ta.value));
-
-  panel.querySelector("#_ci_format").addEventListener("change", e => {
-    SETTINGS.requestFormat = e.target.value;
-    saveSettings();
-  });
-
-  panel.querySelector("#_ci_overflow").addEventListener("change", e => {
-    SETTINGS.overflowStrategy = e.target.value;
-    saveSettings();
-  });
-
-  panel.querySelector("#_ci_limit").addEventListener("change", e => {
-    const v = parseInt(e.target.value, 10);
-    if (!isNaN(v) && v > 0) {
-      SETTINGS.hardCharLimit = v;
-      saveSettings();
-      updateCharCounter(ta.value);
-    }
-  });
-
-  panel.querySelector("#_ci_reserve").addEventListener("change", e => {
-    const v = parseInt(e.target.value, 10);
-    if (!isNaN(v) && v >= 0) {
-      SETTINGS.reserveResponseChars = v;
-      saveSettings();
-      updateCharCounter(ta.value);
-    }
-  });
-
-  panel.querySelector("#_ci_debug").addEventListener("change", e => {
-    SETTINGS.debug = e.target.checked;
-    saveSettings();
-  });
-
-  panel.querySelector("#_ci_save").addEventListener("click", () => {
-    SETTINGS.instruction      = ta.value.trim();
-    SETTINGS.requestFormat    = panel.querySelector("#_ci_format").value;
-    SETTINGS.overflowStrategy = panel.querySelector("#_ci_overflow").value;
-    const lv = parseInt(panel.querySelector("#_ci_limit").value, 10);
-    if (!isNaN(lv) && lv > 0)  SETTINGS.hardCharLimit = lv;
-    const rv = parseInt(panel.querySelector("#_ci_reserve").value, 10);
-    if (!isNaN(rv) && rv >= 0) SETTINGS.reserveResponseChars = rv;
-    SETTINGS.debug = panel.querySelector("#_ci_debug").checked;
-    saveSettings();
-    showSaveConfirmation();
-  });
-
-  panel.querySelector("#_ci_clear").addEventListener("click", () => {
-    if (!confirm("Clear custom instructions?")) return;
-    ta.value = "";
-    SETTINGS.instruction = "";
-    saveSettings();
-    updateCharCounter("");
-    updateFabState();
-  });
-
-  panel.querySelector("#_ci_reset_stats").addEventListener("click", () => {
-    SETTINGS.requestCount = SETTINGS.injectedCount = SETTINGS.skippedCount = 0;
-    saveSettings();
-    syncStats();
-  });
-
-  panel.querySelector("#_ci_close").addEventListener("click", () => togglePanel(false));
-
-  document.addEventListener("keydown", e => {
-    if (matchHotkey(e, CONFIG.PANEL_HOTKEY)) { e.preventDefault(); togglePanel(); }
-    if (e.key === "Escape" && !panel.hidden)  togglePanel(false);
-  });
-
-  document.addEventListener("mousedown", e => {
-    if (!panel.hidden && !panel.contains(e.target) && e.target !== fab) togglePanel(false);
-  });
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-//  PANEL HTML
-// ─────────────────────────────────────────────────────────────────────────────
-
-function buildPanelHTML() {
-  return `
-    <header class="_ci_header">
-      <div class="_ci_title">
-        <span class="_ci_badge">CI</span>
-        Custom Instructions
-      </div>
-      <div class="_ci_header_actions">
-        <label class="_ci_switch" title="Enable / disable injection">
-          <input type="checkbox" id="_ci_enabled">
-          <span class="_ci_slider"></span>
-        </label>
-        <button id="_ci_close" class="_ci_icon_btn" aria-label="Close panel">✕</button>
-      </div>
-    </header>
-
-    <section class="_ci_section">
-      <label class="_ci_label" for="_ci_text">
-        System Instructions
-        <span class="_ci_hint">Prepended silently to every message sent</span>
-      </label>
-      <div class="_ci_ta_wrap">
-        <textarea id="_ci_text" class="_ci_ta" rows="8"
-          placeholder="You are a knowledgeable NYS government AI assistant. Always be concise, accurate, and reference applicable NYS policies where relevant…"
-          spellcheck="true"></textarea>
-        <div class="_ci_ta_footer">
-          <span id="_ci_char_count" class="_ci_char_count">0 chars</span>
-          <span id="_ci_char_warn" class="_ci_char_warn hidden"></span>
-        </div>
-      </div>
-    </section>
-
-    <section class="_ci_section _ci_section--config">
-      <div class="_ci_field_row">
-        <div class="_ci_field">
-          <label class="_ci_label" for="_ci_format">Request Format</label>
-          <select id="_ci_format" class="_ci_select">
-            <option value="auto">Auto-detect</option>
-            <option value="aipro">AI Pro Native</option>
-            <option value="vertex">Vertex AI</option>
-            <option value="openai">OpenAI-compatible</option>
-            <option value="prefix">Prefix (custom)</option>
-          </select>
-        </div>
-        <div class="_ci_field">
-          <label class="_ci_label" for="_ci_overflow">On limit overflow</label>
-          <select id="_ci_overflow" class="_ci_select">
-            <option value="truncate-instruction">Trim instruction to fit</option>
-            <option value="truncate-input">Trim user input to fit</option>
-            <option value="warn-and-skip">Warn &amp; skip injection</option>
-            <option value="block">Warn &amp; block request</option>
-          </select>
-        </div>
-      </div>
-      <div class="_ci_field_row" style="margin-top:10px;">
-        <div class="_ci_field">
-          <label class="_ci_label" for="_ci_limit">Context Limit (chars)</label>
-          <input id="_ci_limit" class="_ci_input" type="number" min="1000" step="10000">
-        </div>
-        <div class="_ci_field">
-          <label class="_ci_label" for="_ci_reserve">
-            Reserve for Response
-            <span class="_ci_hint">chars held back</span>
-          </label>
-          <input id="_ci_reserve" class="_ci_input" type="number" min="0" step="1000">
-        </div>
-      </div>
-      <div class="_ci_debug_row">
-        <label class="_ci_debug_label">
-          <input type="checkbox" id="_ci_debug">
-          <span>Debug mode</span>
-          <span class="_ci_hint">Log modified payloads to console</span>
-        </label>
-      </div>
-    </section>
-
-    <section class="_ci_section">
-      <div class="_ci_stats">
-        <div class="_ci_stat">
-          <span class="_ci_stat_val" id="_ci_s_req">0</span>
-          <span class="_ci_stat_lbl">Requests</span>
-        </div>
-        <div class="_ci_stat">
-          <span class="_ci_stat_val" id="_ci_s_inj">0</span>
-          <span class="_ci_stat_lbl">Injected</span>
-        </div>
-        <div class="_ci_stat">
-          <span class="_ci_stat_val" id="_ci_s_skp">0</span>
-          <span class="_ci_stat_lbl">Skipped</span>
-        </div>
-        <button id="_ci_reset_stats" class="_ci_ghost_btn">Reset</button>
-      </div>
-    </section>
-
-    <footer class="_ci_footer">
-      <button id="_ci_clear" class="_ci_ghost_btn">Clear</button>
-      <div class="_ci_footer_right">
-        <span id="_ci_save_confirm" class="_ci_save_confirm hidden">✓ Saved</span>
-        <button id="_ci_save" class="_ci_primary_btn">Save</button>
-      </div>
-    </footer>
-  `;
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-//  UI STATE HELPERS
-// ─────────────────────────────────────────────────────────────────────────────
-
-function togglePanel(force) {
-  const panel = document.getElementById("_ci_panel");
-  const fab   = document.getElementById("_ci_fab");
-  if (!panel) return;
-  const show = (force !== undefined) ? force : panel.hidden;
-  panel.hidden = !show;
-  fab.classList.toggle("_ci_fab--open", show);
-  if (show) { syncStats(); panel.querySelector("#_ci_text")?.focus(); }
-}
-
-function syncUIFromSettings() {
-  const get = id => document.getElementById(id);
-  if (get("_ci_enabled"))  get("_ci_enabled").checked  = SETTINGS.enabled;
-  if (get("_ci_text"))     get("_ci_text").value        = SETTINGS.instruction;
-  if (get("_ci_format"))   get("_ci_format").value      = SETTINGS.requestFormat;
-  if (get("_ci_overflow")) get("_ci_overflow").value    = SETTINGS.overflowStrategy;
-  if (get("_ci_limit"))    get("_ci_limit").value       = SETTINGS.hardCharLimit;
-  if (get("_ci_reserve"))  get("_ci_reserve").value     = SETTINGS.reserveResponseChars;
-  if (get("_ci_debug"))    get("_ci_debug").checked     = SETTINGS.debug;
-  updateCharCounter(SETTINGS.instruction);
-  updateFabState();
-  syncStats();
-}
-
-function updateCharCounter(text) {
-  const countEl = document.getElementById("_ci_char_count");
-  const warnEl  = document.getElementById("_ci_char_warn");
-  if (!countEl) return;
-
-  const len            = text.length;
-  const effectiveLimit = Math.max(1000,
-    SETTINGS.hardCharLimit - (SETTINGS.reserveResponseChars ?? 0)
-  );
-  const pct = Math.round((len / effectiveLimit) * 100);
-  countEl.textContent = `${len.toLocaleString()} chars`;
-
-  if (pct >= 90) {
-    countEl.style.color = "var(--ci-danger)";
-    warnEl.textContent  = `${pct}% of effective limit — very little room for user input`;
-    warnEl.classList.remove("hidden");
-  } else if (pct >= 70) {
-    countEl.style.color = "var(--ci-warn)";
-    warnEl.textContent  = `${pct}% of effective limit`;
-    warnEl.classList.remove("hidden");
-  } else {
-    countEl.style.color = "";
-    warnEl.classList.add("hidden");
-  }
-}
-
-function updateFabState() {
-  const fab = document.getElementById("_ci_fab");
-  if (!fab) return;
-  const active = SETTINGS.enabled && !!SETTINGS.instruction.trim();
-  fab.classList.toggle("_ci_fab--active",   active);
-  fab.classList.toggle("_ci_fab--inactive", !active);
-  fab.title = SETTINGS.enabled
-    ? (active
-        ? `Custom Instructions: active (${CONFIG.PANEL_HOTKEY})`
-        : `Custom Instructions: no instruction set (${CONFIG.PANEL_HOTKEY})`)
-    : `Custom Instructions: disabled (${CONFIG.PANEL_HOTKEY})`;
-}
-
-function syncStats() {
-  const set = (id, v) => { const el = document.getElementById(id); if (el) el.textContent = v; };
-  set("_ci_s_req", SETTINGS.requestCount.toLocaleString());
-  set("_ci_s_inj", SETTINGS.injectedCount.toLocaleString());
-  set("_ci_s_skp", SETTINGS.skippedCount.toLocaleString());
-}
-
-let saveConfirmTimer;
-function showSaveConfirmation() {
-  const el = document.getElementById("_ci_save_confirm");
-  if (!el) return;
-  el.classList.remove("hidden");
-  updateFabState();
-  clearTimeout(saveConfirmTimer);
-  saveConfirmTimer = setTimeout(() => el.classList.add("hidden"), 2500);
-}
-
-function matchHotkey(e, combo) {
-  const parts = combo.split("+");
-  return parts.includes("Shift") === e.shiftKey
-      && parts.includes("Alt")   === e.altKey
-      && parts.includes("Ctrl")  === e.ctrlKey
-      && parts.includes("Meta")  === e.metaKey
-      && parts.filter(p => !["Shift","Alt","Ctrl","Meta"].includes(p))
-               .every(k => e.key === k || e.code === `Key${k}`);
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-//  STYLES
-// ─────────────────────────────────────────────────────────────────────────────
-
-function injectStyles() {
-  const style = document.createElement("style");
-  style.id = "_ci_styles";
-  style.textContent = `
-    :root {
-      --ci-blue:    #154973;
-      --ci-gold:    #FACE00;
-      --ci-bg:      #f8f9fb;
-      --ci-surface: #ffffff;
-      --ci-border:  #dde2ea;
-      --ci-text:    #1a2436;
-      --ci-muted:   #6b7a90;
-      --ci-danger:  #c0392b;
-      --ci-warn:    #e67e22;
-      --ci-success: #27ae60;
-      --ci-radius:  10px;
-      --ci-shadow:  0 8px 32px rgba(21,73,115,.18), 0 2px 8px rgba(0,0,0,.08);
-      --ci-z:       2147483647;
+        injectStyles(); buildUI();
     }
 
-    /* ── FAB ─────────────────────────────────────────────────────────────── */
-    #_ci_fab {
-      position: fixed; bottom: 24px; right: 24px; z-index: var(--ci-z);
-      width: 48px; height: 48px; border-radius: 50%; border: none;
-      background: var(--ci-blue); color: #fff; cursor: pointer;
-      display: flex; align-items: center; justify-content: center;
-      box-shadow: 0 4px 16px rgba(21,73,115,.35);
-      transition: transform .15s ease, box-shadow .15s ease, background .15s;
-      outline: none;
-    }
-    #_ci_fab:hover  { transform: scale(1.08); box-shadow: 0 6px 20px rgba(21,73,115,.45); }
-    #_ci_fab:active { transform: scale(.96); }
-    #_ci_fab svg    { width: 22px; height: 22px; }
-    #_ci_fab._ci_fab--open { background: #0d3255; }
-    #_ci_fab._ci_fab--active::after {
-      content: ''; position: absolute; top: 6px; right: 6px;
-      width: 9px; height: 9px; border-radius: 50%;
-      background: var(--ci-gold); border: 2px solid #fff;
-    }
-
-    /* ── Panel ───────────────────────────────────────────────────────────── */
-    #_ci_panel {
-      position: fixed; bottom: 82px; right: 24px; z-index: var(--ci-z);
-      width: 460px; max-width: calc(100vw - 32px); max-height: calc(100vh - 100px);
-      overflow-y: auto; background: var(--ci-surface);
-      border: 1px solid var(--ci-border); border-radius: var(--ci-radius);
-      box-shadow: var(--ci-shadow);
-      font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
-      font-size: 13px; color: var(--ci-text);
-      animation: _ci_slide_in .18s ease;
-    }
-    @keyframes _ci_slide_in {
-      from { opacity: 0; transform: translateY(10px) scale(.98); }
-      to   { opacity: 1; transform: translateY(0) scale(1); }
-    }
-    #_ci_panel[hidden] { display: none; }
-
-    /* ── Header ──────────────────────────────────────────────────────────── */
-    ._ci_header {
-      display: flex; align-items: center; justify-content: space-between;
-      padding: 14px 16px; background: var(--ci-blue); color: #fff;
-      border-radius: var(--ci-radius) var(--ci-radius) 0 0;
-    }
-    ._ci_title   { display: flex; align-items: center; gap: 8px; font-weight: 700; font-size: 14px; }
-    ._ci_badge   { background: var(--ci-gold); color: var(--ci-blue); font-weight: 800; font-size: 10px; padding: 2px 5px; border-radius: 4px; letter-spacing: .05em; }
-    ._ci_header_actions { display: flex; align-items: center; gap: 10px; }
-
-    /* ── Toggle switch ───────────────────────────────────────────────────── */
-    ._ci_switch  { position: relative; display: inline-block; width: 38px; height: 22px; cursor: pointer; }
-    ._ci_switch input { opacity: 0; width: 0; height: 0; }
-    ._ci_slider  { position: absolute; inset: 0; background: rgba(255,255,255,.25); border-radius: 22px; transition: background .2s; }
-    ._ci_slider::before { content: ''; position: absolute; width: 16px; height: 16px; left: 3px; top: 3px; background: #fff; border-radius: 50%; transition: transform .2s; }
-    ._ci_switch input:checked + ._ci_slider { background: var(--ci-gold); }
-    ._ci_switch input:checked + ._ci_slider::before { transform: translateX(16px); }
-
-    /* ── Sections ────────────────────────────────────────────────────────── */
-    ._ci_section         { padding: 14px 16px; border-bottom: 1px solid var(--ci-border); }
-    ._ci_section--config { display: flex; flex-direction: column; }
-    ._ci_field_row       { display: flex; gap: 12px; }
-    ._ci_field           { flex: 1; display: flex; flex-direction: column; }
-
-    /* ── Labels ──────────────────────────────────────────────────────────── */
-    ._ci_label {
-      display: flex; align-items: baseline; gap: 6px;
-      font-weight: 600; font-size: 11px; color: var(--ci-text);
-      margin-bottom: 6px; text-transform: uppercase; letter-spacing: .04em;
-    }
-    ._ci_hint { font-size: 11px; font-weight: 400; color: var(--ci-muted); text-transform: none; letter-spacing: 0; }
-
-    /* ── Debug row ───────────────────────────────────────────────────────── */
-    ._ci_debug_row { margin-top: 10px; }
-    ._ci_debug_label {
-      display: flex; align-items: center; gap: 7px;
-      font-size: 12px; color: var(--ci-muted); cursor: pointer;
-    }
-    ._ci_debug_label input[type=checkbox] { accent-color: var(--ci-blue); cursor: pointer; }
-    ._ci_debug_label span:first-of-type { color: var(--ci-text); font-weight: 600; }
-
-    /* ── Textarea ────────────────────────────────────────────────────────── */
-    ._ci_ta_wrap { position: relative; }
-    ._ci_ta {
-      width: 100%; box-sizing: border-box;
-      border: 1.5px solid var(--ci-border); border-radius: 6px;
-      padding: 9px 11px; font-family: inherit; font-size: 13px;
-      color: var(--ci-text); background: var(--ci-bg);
-      resize: vertical; line-height: 1.5; outline: none; transition: border-color .15s;
-    }
-    ._ci_ta:focus { border-color: var(--ci-blue); background: #fff; }
-    ._ci_ta_footer { display: flex; justify-content: space-between; align-items: center; margin-top: 5px; }
-    ._ci_char_count { font-size: 11px; color: var(--ci-muted); }
-    ._ci_char_warn  { font-size: 11px; font-weight: 600; }
-    ._ci_char_warn.hidden { display: none; }
-
-    /* ── Controls ────────────────────────────────────────────────────────── */
-    ._ci_select, ._ci_input {
-      width: 100%; box-sizing: border-box;
-      border: 1.5px solid var(--ci-border); border-radius: 6px;
-      padding: 7px 9px; font-family: inherit; font-size: 12px;
-      color: var(--ci-text); background: var(--ci-bg); outline: none;
-    }
-    ._ci_select:focus, ._ci_input:focus { border-color: var(--ci-blue); background: #fff; }
-
-    /* ── Stats ───────────────────────────────────────────────────────────── */
-    ._ci_stats    { display: flex; align-items: center; gap: 16px; }
-    ._ci_stat     { display: flex; flex-direction: column; align-items: center; gap: 2px; }
-    ._ci_stat_val { font-weight: 700; font-size: 18px; color: var(--ci-blue); line-height: 1; }
-    ._ci_stat_lbl { font-size: 10px; color: var(--ci-muted); text-transform: uppercase; letter-spacing: .05em; }
-
-    /* ── Buttons ─────────────────────────────────────────────────────────── */
-    ._ci_primary_btn {
-      background: var(--ci-blue); color: #fff; border: none; border-radius: 6px;
-      padding: 8px 20px; font-family: inherit; font-size: 13px; font-weight: 600;
-      cursor: pointer; transition: background .15s;
-    }
-    ._ci_primary_btn:hover { background: #0d3255; }
-    ._ci_ghost_btn {
-      background: none; color: var(--ci-muted); border: 1.5px solid var(--ci-border);
-      border-radius: 6px; padding: 7px 14px; font-family: inherit;
-      font-size: 12px; cursor: pointer; transition: border-color .15s, color .15s;
-    }
-    ._ci_ghost_btn:hover { border-color: var(--ci-blue); color: var(--ci-blue); }
-    ._ci_icon_btn {
-      background: rgba(255,255,255,.15); border: none; color: #fff;
-      border-radius: 4px; width: 24px; height: 24px;
-      display: flex; align-items: center; justify-content: center;
-      cursor: pointer; font-size: 14px; transition: background .15s;
-    }
-    ._ci_icon_btn:hover { background: rgba(255,255,255,.3); }
-
-    /* ── Footer ──────────────────────────────────────────────────────────── */
-    ._ci_footer {
-      display: flex; align-items: center; justify-content: space-between;
-      padding: 12px 16px; background: var(--ci-bg);
-      border-radius: 0 0 var(--ci-radius) var(--ci-radius);
-    }
-    ._ci_footer_right  { display: flex; align-items: center; gap: 10px; }
-    ._ci_save_confirm  { font-size: 12px; color: var(--ci-success); font-weight: 600; }
-    ._ci_save_confirm.hidden { display: none; }
-
-    /* ── Banner ──────────────────────────────────────────────────────────── */
-    #_ci_banner {
-      display: none; position: fixed; top: 16px; left: 50%; transform: translateX(-50%);
-      z-index: var(--ci-z); max-width: 520px; width: calc(100vw - 32px);
-      padding: 10px 16px; border-radius: 8px; font-size: 13px; line-height: 1.4;
-      box-shadow: 0 4px 16px rgba(0,0,0,.18); pointer-events: none;
-    }
-    ._ci_banner--warn    { background: #fff8e1; border: 1.5px solid #f39c12; color: #7d5a00; }
-    ._ci_banner--error   { background: #fdecea; border: 1.5px solid #e74c3c; color: #7b1e1e; }
-    ._ci_banner--success { background: #e8f5e9; border: 1.5px solid #43a047; color: #1b5e20; }
-
-    .hidden { display: none !important; }
-  `;
-  document.head.appendChild(style);
-}
+})();
