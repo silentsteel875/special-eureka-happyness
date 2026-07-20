@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         StateJobsNY responsive/full-width layout
 // @namespace    https://statejobsny.com/
-// @version      3.3.6
+// @version      3.4.1
 // @description  Makes StateJobsNY public and employee pages use the full viewport with configurable page settings.
 // @author       You
 // @match        https://statejobsny.com/public/*
@@ -10,9 +10,25 @@
 // @match        https://statejobs.ny.gov/employees/*
 // @run-at       document-idle
 // @grant        none
+// @history      3.4.1 - Feature: Added mobile-optimized modal scaling. Fixed: UX for global deadline filter.
+// @history      3.4.0 - Feature: Added global deadline filter. Fixed: UX for responsive toggle and compare tool cleanup.
+// @history      3.3.6 - Feature: Slowed down Fun Mode animations for better visual comfort.
+// @history      3.3.5 - Feature: Added math-based JS animation loop for Fun Mode patterns.
+// @history      Previous - Initial responsive layout, compare tool, salary range estimation, and hover previews.
 // @updateURL    https://github.com/silentsteel875/special-eureka-happyness/raw/refs/heads/main/statejobsny-responsive.user.js
 // @downloadURL  https://github.com/silentsteel875/special-eureka-happyness/raw/refs/heads/main/statejobsny-responsive.user.js
 // ==/UserScript==
+
+/**
+ * CHANGELOG
+ * ---------
+ * v3.4.0:
+ * - Mobile modal scaling (85vw/85vh)
+ * - "Responsive Layout" toggle now resets Entries Per Page to 100
+ * - "Close to Deadline" acts as a global URL filter
+ * v3.3.6:
+ * - Adjusted fun mode to 15s cycle and soft pastels
+ */
 
 (function () {
   'use strict';
@@ -87,7 +103,7 @@
   const compareCache = new Map();
   const selectedCompareUrls = new Set();
   let compareValidationMessage = '';
-  let closeDeadlineFilterActive = false;
+  let closeDeadlineFilterActive = new URLSearchParams(window.location.search).get('tmCloseDeadline') === '1';
   let vacancyRefreshScheduled = false;
   let funModeActive = false;
   let funModeFrame = null;
@@ -383,6 +399,49 @@
       @keyframes tm-spin {
         to { transform: rotate(360deg); }
       }
+
+      /* RESPONSIVE LAYOUT COMPARE TOGGLE */
+      body:not(.tm-responsive-enabled) .tm-compare-header,
+      body:not(.tm-responsive-enabled) .tm-compare-cell,
+      body:not(.tm-responsive-enabled) #${COMPARE_BUTTON_ID},
+      body:not(.tm-responsive-enabled) #${CLEAR_BUTTON_ID},
+      body:not(.tm-responsive-enabled) #${COMPARE_ERROR_ID} {
+        display: none !important;
+      }
+
+      /* MOBILE MODAL SIZING */
+      @media (max-width: 980px) {
+        #${SETTINGS_MODAL_ID} {
+          width: 85vw !important;
+          height: 85vh !important;
+          max-width: none !important;
+          max-height: none !important;
+          margin: auto;
+        }
+        #${SETTINGS_MODAL_ID} .tm-settings-body {
+          max-height: calc(85vh - 50px) !important;
+          padding: 15px !important;
+        }
+        #${SETTINGS_MODAL_ID} .tm-settings-row {
+          font-size: 16px !important;
+          white-space: normal !important;
+          word-wrap: break-word !important;
+        }
+        #${SETTINGS_MODAL_ID} .tm-settings-note {
+          font-size: 14px !important;
+          white-space: normal !important;
+          word-wrap: break-word !important;
+          margin-left: 0 !important;
+          margin-bottom: 10px !important;
+        }
+        #${SETTINGS_MODAL_ID} input[type="text"],
+        #${SETTINGS_MODAL_ID} input[type="number"],
+        #${SETTINGS_MODAL_ID} select {
+          font-size: 16px !important;
+          padding: 6px !important;
+          max-width: 100% !important;
+        }
+      }
     `;
     document.head.appendChild(style);
     return style;
@@ -412,6 +471,23 @@
       }
     });
     return lengthSelect;
+  };
+
+  const removeCustomLengthOptions = () => {
+    const lengthSelect = document.querySelector('select[name="vacancyTable_length"], #vacancyTable_wrapper .dt-length select');
+    if (!lengthSelect) return;
+    let changed = false;
+    Array.from(lengthSelect.options).forEach(opt => {
+      if (['250', '500', '9999'].includes(opt.value)) {
+        opt.remove();
+        changed = true;
+      }
+    });
+    // If we removed the currently active selection, reset the dropdown
+    if (changed && (!lengthSelect.value || ['250', '500', '9999'].includes(lengthSelect.value))) {
+      lengthSelect.value = lengthSelect.querySelector('option[value="100"]') ? '100' : lengthSelect.options[0].value;
+      lengthSelect.dispatchEvent(new Event('change', { bubbles: true }));
+    }
   };
 
   const applyDefaultEntriesPerPage = () => {
@@ -885,16 +961,20 @@
     if (!yesterdayLink || !yesterdayLink.parentElement) return;
 
     const link = document.createElement('a');
-    link.href = '#';
     link.id = 'tm-close-deadline-link';
-    link.textContent = 'Close to Deadline Postings';
-    link.setAttribute('aria-pressed', 'false');
-    link.addEventListener('click', (event) => {
-      event.preventDefault();
-      closeDeadlineFilterActive = !closeDeadlineFilterActive;
-      updateCloseDeadlineLink();
-      applyCloseDeadlineFilter();
-    });
+
+    // Convert to global filter by triggering standard page navigation
+    if (closeDeadlineFilterActive) {
+      link.textContent = 'All Postings';
+      const url = new URL(window.location.href);
+      url.searchParams.delete('tmCloseDeadline');
+      link.href = url.pathname + url.search;
+    } else {
+      link.textContent = 'Close to Deadline Postings';
+      link.href = window.location.pathname + '?searchResults=yes&tmCloseDeadline=1';
+    }
+
+    link.setAttribute('aria-pressed', String(closeDeadlineFilterActive));
     yesterdayLink.parentElement.appendChild(document.createElement('br'));
     yesterdayLink.parentElement.appendChild(link);
   };
@@ -1579,6 +1659,9 @@
     if (link) {
       link.textContent = 'Close to Deadline Postings';
       link.setAttribute('aria-pressed', 'false');
+      const url = new URL(window.location.href);
+      url.searchParams.delete('tmCloseDeadline');
+      link.href = url.pathname + url.search;
     }
 
     document.querySelectorAll('.tm-compare-checkbox').forEach((input) => {
@@ -1771,6 +1854,8 @@
 
   const applyState = () => {
     ensureBaseUiStyle();
+    document.body.classList.toggle('tm-responsive-enabled', enabled);
+
     if (enabled) {
       ensureStyle();
       retrySetLength();
@@ -1786,6 +1871,7 @@
       ensureGradeAscendingSort();
       updateCompareButtonState();
     } else {
+      removeCustomLengthOptions();
       stopDeadlinePulseTimer();
       stopLazySalaryPoller();
       stopFunModeAnimation();
@@ -1815,3 +1901,5 @@
   window.addEventListener('resize', applyMobileNavState);
   window.addEventListener('resize', clampPreviewToViewport);
 })();
+
+//# sourceURL=StateJobsNY_Responsive_v3.js
