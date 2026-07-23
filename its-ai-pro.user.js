@@ -9,6 +9,8 @@
 // @grant        GM_getValue
 // @grant        GM_registerMenuCommand
 // @run-at       document-start
+// @updateURL    https://github.com/silentsteel875/special-eureka-happyness/raw/refs/heads/main/its-ai-pro.user.js
+// @downloadURL  https://github.com/silentsteel875/special-eureka-happyness/raw/refs/heads/main/its-ai-pro.user.js
 // ==/UserScript==
 
 (function () {
